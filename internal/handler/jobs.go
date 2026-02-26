@@ -178,3 +178,44 @@ func (h *JobHandler) ToggleBookmark(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"bookmarked": bookmarked})
 }
+
+// Lightweight endpoint for Kanban drag-and-drop — only updates the status field
+func (h *JobHandler) UpdateJobStatus(c *gin.Context) {
+	userID, err := getUserID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		return
+	}
+
+	jobID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job ID"})
+		return
+	}
+
+	var req struct {
+		Status string `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Status is required"})
+		return
+	}
+
+	// Validate status value
+	validStatuses := map[string]bool{
+		"saved": true, "applied": true, "screening": true,
+		"interview": true, "offer": true, "rejected": true,
+	}
+	if !validStatuses[req.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status. Must be: saved, applied, screening, interview, offer, rejected"})
+		return
+	}
+
+	if err := h.jobRepo.UpdateStatus(c.Request.Context(), jobID, userID, req.Status); err != nil {
+		log.Error().Err(err).Msg("Failed to update job status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": req.Status})
+}

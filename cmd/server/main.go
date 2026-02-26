@@ -55,13 +55,19 @@ func main() {
 	appRepo := repository.NewApplicationRepo(pool)
 	noteRepo := repository.NewNoteRepo(pool)
 	contactRepo := repository.NewContactRepo(pool)
+	feedRepo := repository.NewFeedRepo(pool)
+
+	// ── Services ──────────────────────────────────────────
+	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
+	jsearchClient := service.NewJSearchClient(cfg.RapidAPIKey)
+	feedService := service.NewFeedService(jsearchClient, feedRepo, userRepo)
 
 	// ── Handlers ─────────────────────────────────────────
 	authHandler := handler.NewAuthHandler(userRepo)
 	profileHandler := handler.NewProfileHandler(userRepo)
 	jobHandler := handler.NewJobHandler(jobRepo)
-	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
 	parseHandler := handler.NewParseHandler(claudeClient)
+	feedHandler := handler.NewFeedHandler(feedService, feedRepo)
 	_ = appRepo     // Will be used by application handler
 	_ = noteRepo    // Will be used by notes handler
 	_ = contactRepo // Will be used by contacts handler
@@ -85,7 +91,7 @@ func main() {
 	// CORS
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.AllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Authorization", "Content-Type"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
@@ -123,6 +129,13 @@ func main() {
 		api.PUT("/jobs/:id", jobHandler.UpdateJob)
 		api.DELETE("/jobs/:id", jobHandler.DeleteJob)
 		api.POST("/jobs/:id/bookmark", jobHandler.ToggleBookmark)
+		api.PATCH("/jobs/:id/status", jobHandler.UpdateJobStatus)
+
+		// Feed (discover)
+		api.GET("/feed", feedHandler.GetFeed)
+		api.POST("/feed/refresh", feedHandler.RefreshFeed)
+		api.POST("/feed/:id/dismiss", feedHandler.DismissFeedJob)
+		api.POST("/feed/:id/save", feedHandler.SaveFeedJob)
 
 		// Applications (TODO: implement handlers)
 		// api.GET("/jobs/:id/application", appHandler.Get)

@@ -44,6 +44,7 @@ type Job struct {
 	CompanyColor    string     `json:"companyColor,omitempty"`
 	MatchScore      int        `json:"matchScore"`
 	Bookmarked      bool       `json:"bookmarked"`
+	Status          string     `json:"status"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
 }
@@ -142,6 +143,44 @@ type CompetitiveSnapshot struct {
 	AvgMatchScore  int       `json:"avgMatchScore"`
 	Trend          string    `json:"trend"`
 	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// FeedJob represents a cached job listing from external APIs
+type FeedJob struct {
+	ID             uuid.UUID  `json:"id"`
+	ExternalID     string     `json:"externalId"`
+	Source         string     `json:"source"`
+	Title          string     `json:"title"`
+	Company        string     `json:"company"`
+	Location       string     `json:"location"`
+	SalaryMin      int        `json:"salaryMin"`
+	SalaryMax      int        `json:"salaryMax"`
+	SalaryText     string     `json:"salaryText"`
+	JobType        string     `json:"jobType"`
+	Description    string     `json:"description"`
+	RequiredSkills []string   `json:"requiredSkills"`
+	ApplyURL       string     `json:"applyUrl"`
+	CompanyLogo    string     `json:"companyLogo"`
+	PostedAt       *time.Time `json:"postedAt,omitempty"`
+	FetchedAt      time.Time  `json:"fetchedAt"`
+
+	// Per-user fields (populated from user_feed join)
+	MatchScore     int        `json:"matchScore"`
+	Dismissed      bool       `json:"dismissed"`
+	Saved          bool       `json:"saved"`
+	SavedJobID     *uuid.UUID `json:"savedJobId,omitempty"`
+}
+
+// UserFeed links a user to a feed job with personalized data
+type UserFeed struct {
+	ID         uuid.UUID  `json:"id"`
+	UserID     uuid.UUID  `json:"userId"`
+	FeedJobID  uuid.UUID  `json:"feedJobId"`
+	MatchScore int        `json:"matchScore"`
+	Dismissed  bool       `json:"dismissed"`
+	Saved      bool       `json:"saved"`
+	SavedJobID *uuid.UUID `json:"savedJobId,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
 }
 
 // DashboardSummary is the aggregated response for the home tab

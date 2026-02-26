@@ -24,7 +24,7 @@ func (r *JobRepo) List(ctx context.Context, userID uuid.UUID, filter JobFilter) 
 		SELECT id, user_id, external_id, source, title, company, location,
 		       salary_range, job_type, description, tags, required_skills,
 		       preferred_skills, apply_url, hiring_email, company_logo,
-		       company_color, match_score, bookmarked, created_at, updated_at
+		       company_color, match_score, bookmarked, status, created_at, updated_at
 		FROM jobs
 		WHERE user_id = $1
 	`
@@ -63,6 +63,7 @@ func (r *JobRepo) List(ctx context.Context, userID uuid.UUID, filter JobFilter) 
 			&j.Location, &j.SalaryRange, &j.JobType, &j.Description, &j.Tags,
 			&j.RequiredSkills, &j.PreferredSkills, &j.ApplyURL, &j.HiringEmail,
 			&j.CompanyLogo, &j.CompanyColor, &j.MatchScore, &j.Bookmarked,
+			&j.Status,
 			&j.CreatedAt, &j.UpdatedAt,
 		)
 		if err != nil {
@@ -88,7 +89,7 @@ func (r *JobRepo) FindByID(ctx context.Context, id uuid.UUID, userID uuid.UUID) 
 		&j.ID, &j.UserID, &j.ExternalID, &j.Source, &j.Title, &j.Company,
 		&j.Location, &j.SalaryRange, &j.JobType, &j.Description, &j.Tags,
 		&j.RequiredSkills, &j.PreferredSkills, &j.ApplyURL, &j.HiringEmail,
-		&j.CompanyLogo, &j.CompanyColor, &j.MatchScore, &j.Bookmarked,
+		&j.CompanyLogo, &j.CompanyColor, &j.MatchScore, &j.Bookmarked, &j.Status,
 		&j.CreatedAt, &j.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -107,23 +108,23 @@ func (r *JobRepo) Create(ctx context.Context, j *model.Job) (*model.Job, error) 
 		INSERT INTO jobs (user_id, external_id, source, title, company, location,
 		                  salary_range, job_type, description, tags, required_skills,
 		                  preferred_skills, apply_url, hiring_email, company_logo,
-		                  company_color, match_score, bookmarked)
+		                  company_color, match_score, bookmarked, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		RETURNING id, user_id, external_id, source, title, company, location,
 		          salary_range, job_type, description, tags, required_skills,
 		          preferred_skills, apply_url, hiring_email, company_logo,
-		          company_color, match_score, bookmarked, created_at, updated_at
+		          company_color, match_score, bookmarked, status, created_at, updated_at
 	`, j.UserID, j.ExternalID, j.Source, j.Title, j.Company, j.Location,
 		j.SalaryRange, j.JobType, j.Description, j.Tags, j.RequiredSkills,
 		j.PreferredSkills, j.ApplyURL, j.HiringEmail, j.CompanyLogo,
-		j.CompanyColor, j.MatchScore, j.Bookmarked,
+		j.CompanyColor, j.MatchScore, j.Bookmarked, j.Status,
 	).Scan(
 		&created.ID, &created.UserID, &created.ExternalID, &created.Source,
 		&created.Title, &created.Company, &created.Location, &created.SalaryRange,
 		&created.JobType, &created.Description, &created.Tags, &created.RequiredSkills,
 		&created.PreferredSkills, &created.ApplyURL, &created.HiringEmail,
 		&created.CompanyLogo, &created.CompanyColor, &created.MatchScore,
-		&created.Bookmarked, &created.CreatedAt, &created.UpdatedAt,
+		&created.Bookmarked, &created.Status, &created.CreatedAt, &created.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating job: %w", err)
@@ -139,22 +140,23 @@ func (r *JobRepo) Update(ctx context.Context, j *model.Job) (*model.Job, error) 
 		SET title = $3, company = $4, location = $5, salary_range = $6,
 		    job_type = $7, description = $8, tags = $9, required_skills = $10,
 		    preferred_skills = $11, apply_url = $12, hiring_email = $13,
-		    match_score = $14, bookmarked = $15, updated_at = now()
+		    match_score = $14, bookmarked = $15, status = $16, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING id, user_id, external_id, source, title, company, location,
 		          salary_range, job_type, description, tags, required_skills,
 		          preferred_skills, apply_url, hiring_email, company_logo,
-		          company_color, match_score, bookmarked, created_at, updated_at
+		          company_color, match_score, bookmarked, status, created_at, updated_at
 	`, j.ID, j.UserID, j.Title, j.Company, j.Location, j.SalaryRange,
 		j.JobType, j.Description, j.Tags, j.RequiredSkills, j.PreferredSkills,
 		j.ApplyURL, j.HiringEmail, j.MatchScore, j.Bookmarked,
+		j.Status,
 	).Scan(
 		&updated.ID, &updated.UserID, &updated.ExternalID, &updated.Source,
 		&updated.Title, &updated.Company, &updated.Location, &updated.SalaryRange,
 		&updated.JobType, &updated.Description, &updated.Tags, &updated.RequiredSkills,
 		&updated.PreferredSkills, &updated.ApplyURL, &updated.HiringEmail,
 		&updated.CompanyLogo, &updated.CompanyColor, &updated.MatchScore,
-		&updated.Bookmarked, &updated.CreatedAt, &updated.UpdatedAt,
+		&updated.Bookmarked, &updated.Status, &updated.CreatedAt, &updated.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("updating job: %w", err)
@@ -193,4 +195,21 @@ type JobFilter struct {
 	Search        string
 	LocationType  string // "", "remote", "onsite"
 	BookmarkedOnly bool
+}
+
+// UpdateStatus updates only the status field of a job
+// Add this method to JobRepo in repository/jobs.go
+func (r *JobRepo) UpdateStatus(ctx context.Context, jobID, userID uuid.UUID, status string) error {
+	result, err := r.pool.Exec(ctx,
+		`UPDATE jobs SET status = $1, updated_at = now()
+		 WHERE id = $2 AND user_id = $3`,
+		status, jobID, userID,
+	)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("job not found")
+	}
+	return nil
 }
