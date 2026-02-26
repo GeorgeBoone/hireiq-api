@@ -19,6 +19,7 @@ import (
 	"github.com/yourusername/hireiq-api/internal/handler"
 	"github.com/yourusername/hireiq-api/internal/middleware"
 	"github.com/yourusername/hireiq-api/internal/repository"
+	"github.com/yourusername/hireiq-api/internal/service"
 )
 
 func main() {
@@ -59,6 +60,8 @@ func main() {
 	authHandler := handler.NewAuthHandler(userRepo)
 	profileHandler := handler.NewProfileHandler(userRepo)
 	jobHandler := handler.NewJobHandler(jobRepo)
+	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
+	parseHandler := handler.NewParseHandler(claudeClient)
 	_ = appRepo     // Will be used by application handler
 	_ = noteRepo    // Will be used by notes handler
 	_ = contactRepo // Will be used by contacts handler
@@ -115,6 +118,7 @@ func main() {
 		// Jobs
 		api.GET("/jobs", jobHandler.ListJobs)
 		api.POST("/jobs", jobHandler.CreateJob)
+		api.POST("/jobs/parse", parseHandler.ParseJobPosting)
 		api.GET("/jobs/:id", jobHandler.GetJob)
 		api.PUT("/jobs/:id", jobHandler.UpdateJob)
 		api.DELETE("/jobs/:id", jobHandler.DeleteJob)
