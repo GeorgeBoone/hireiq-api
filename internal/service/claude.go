@@ -215,3 +215,236 @@ func FetchURLContent(ctx context.Context, url string) (string, error) {
 
 	return string(body), nil
 }
+
+// ── Resume Critique ───────────────────────────────────
+// Add this to the bottom of internal/service/claude.go
+
+// CritiqueResult is the structured response from resume critique
+type CritiqueResult struct {
+	Score     int              `json:"score"`
+	Issues    []CritiqueIssue  `json:"issues"`
+	Strengths []string         `json:"strengths"`
+	TopTip    string           `json:"topTip"`
+}
+
+type CritiqueIssue struct {
+	Cat string `json:"cat"`
+	Sev string `json:"sev"`
+	Msg string `json:"msg"`
+}
+
+const critiqueSystemPrompt = `You are HireIQ's resume critique AI. Analyze resumes and provide actionable feedback.
+
+CRITICAL RULES:
+- Do NOT rewrite the resume. Only provide specific recommendations.
+- Be direct and actionable — every issue should tell the user exactly what to change.
+- Focus on what will make the biggest difference for getting interviews.
+
+Respond with ONLY a JSON object (no markdown, no backticks, no explanation):
+{
+  "score": 72,
+  "issues": [
+    {"cat": "Impact", "sev": "critical", "msg": "Your bullet points lack quantifiable metrics. Instead of 'Improved site performance', say 'Reduced page load time by 40% through code splitting, improving Core Web Vitals from 62 to 94'."},
+    {"cat": "Language", "sev": "warning", "msg": "Weak verb 'helped' found in 3 bullets. Replace with action verbs: 'Architected', 'Spearheaded', 'Delivered'."}
+  ],
+  "strengths": ["Clear section organization", "Includes relevant technical skills"],
+  "topTip": "The single most impactful change: add 2-3 metrics to your most recent role showing business impact (revenue, users, performance, cost savings)."
+}
+
+Categories: Impact, Language, Structure, Formatting, Alignment, Clarity, Punctuation, Length, ATS
+Severities: critical (blocks interviews), warning (weakens impression), info (nice to improve)
+
+Guidelines:
+- Give 4-8 issues, ordered by severity (critical first)
+- Give 2-5 strengths — find genuine positives
+- Score 0-100: 90+ is exceptional, 70-89 is solid, 50-69 needs work, <50 has major issues
+- Check for: quantifiable metrics, action verbs vs weak verbs (worked, helped, used, did, made, attended), clichés (fast-paced, team player, detail-oriented), ATS compatibility, consistent formatting, appropriate length
+- If a target role is provided, check skill alignment and tailor advice accordingly
+- topTip should be the single highest-impact change they can make`
+
+// CritiqueResume sends a resume to Claude for structured analysis
+func (c *ClaudeClient) CritiqueResume(ctx context.Context, resumeText, jobContext string) (*CritiqueResult, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("Claude API key not configured")
+	}
+
+	userContent := "Analyze this resume and return the JSON critique:\n\n" + resumeText
+	if jobContext != "" {
+		userContent += "\n\n---\n" + jobContext
+	}
+
+	reqBody := claudeRequest{
+		Model:     "claude-sonnet-4-5-20250929",
+		MaxTokens: 2000,
+		System:    critiqueSystemPrompt,
+		Messages: []claudeMessage{
+			{Role: "user", Content: userContent},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling Claude API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var claudeResp claudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return nil, fmt.Errorf("parsing Claude response: %w", err)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return nil, fmt.Errorf("empty response from Claude")
+	}
+
+	text := strings.TrimSpace(claudeResp.Content[0].Text)
+	text = stripCodeFences(text)
+
+	var result CritiqueResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("parsing critique result: %w (raw: %s)", err, text)
+	}
+
+	return &result, nil
+}
+
+// ── Resume Fix Suggestions ────────────────────────────
+
+type FixResult struct {
+	Suggestions []FixSuggestion `json:"suggestions"`
+}
+
+type FixSuggestion struct {
+	Before      string `json:"before"`
+	After       string `json:"after"`
+	Explanation string `json:"explanation"`
+}
+
+const fixSystemPrompt = `You are HireIQ's resume coach. A user's resume has a specific issue. Provide targeted fixes.
+
+CRITICAL RULES:
+- Do NOT rewrite the full resume.
+- Provide 2-3 specific, actionable before/after suggestions for THIS issue only.
+- Each suggestion should show what's currently in the resume (or the pattern that's wrong) and how to improve it.
+
+Respond with ONLY a JSON object (no markdown, no backticks):
+{
+  "suggestions": [
+    {
+      "before": "Built and maintained multiple React applications",
+      "after": "Architected and scaled 3 React applications serving 50k+ monthly active users",
+      "explanation": "Adding scope and metrics demonstrates measurable impact"
+    }
+  ]
+}
+
+Keep suggestions directly tied to the specific issue. Be concrete — use actual text from the resume where possible.`
+
+// FixResumeIssue gets before/after fix suggestions for a specific resume issue
+func (c *ClaudeClient) FixResumeIssue(ctx context.Context, resumeText, issueCat, issueSev, issueMsg, jobContext string) (*FixResult, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("Claude API key not configured")
+	}
+
+	userContent := fmt.Sprintf(
+		"Resume:\n%s\n\nIssue to fix:\nCategory: %s\nSeverity: %s\nDetails: %s",
+		resumeText, issueCat, issueSev, issueMsg,
+	)
+	if jobContext != "" {
+		userContent += "\n\n" + jobContext
+	}
+
+	reqBody := claudeRequest{
+		Model:     "claude-sonnet-4-5-20250929",
+		MaxTokens: 1500,
+		System:    fixSystemPrompt,
+		Messages: []claudeMessage{
+			{Role: "user", Content: userContent},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling Claude API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var claudeResp claudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return nil, fmt.Errorf("parsing Claude response: %w", err)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return nil, fmt.Errorf("empty response from Claude")
+	}
+
+	text := strings.TrimSpace(claudeResp.Content[0].Text)
+	text = stripCodeFences(text)
+
+	var result FixResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("parsing fix suggestions: %w (raw: %s)", err, text)
+	}
+
+	return &result, nil
+}
+
+// stripCodeFences removes markdown ```json ... ``` wrappers
+func stripCodeFences(text string) string {
+	if strings.HasPrefix(text, "```") {
+		if idx := strings.Index(text, "\n"); idx != -1 {
+			text = text[idx+1:]
+		}
+		if idx := strings.LastIndex(text, "```"); idx != -1 {
+			text = text[:idx]
+		}
+		text = strings.TrimSpace(text)
+	}
+	return text
+}
