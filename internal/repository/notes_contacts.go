@@ -192,6 +192,35 @@ func (r *ContactRepo) Delete(ctx context.Context, id, userID uuid.UUID) error {
 	return nil
 }
 
+// ListByCompany returns contacts for a specific company
+func (r *ContactRepo) ListByCompany(ctx context.Context, userID uuid.UUID, company string) ([]model.Contact, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, user_id, name, company, role, connection, phone, email,
+		       tip, enriched, enriched_data, created_at, updated_at
+		FROM contacts
+		WHERE user_id = $1 AND LOWER(company) = LOWER($2)
+		ORDER BY name ASC
+	`, userID, company)
+	if err != nil {
+		return nil, fmt.Errorf("listing contacts by company: %w", err)
+	}
+	defer rows.Close()
+
+	var contacts []model.Contact
+	for rows.Next() {
+		var c model.Contact
+		if err := rows.Scan(
+			&c.ID, &c.UserID, &c.Name, &c.Company, &c.Role, &c.Connection,
+			&c.Phone, &c.Email, &c.Tip, &c.Enriched, &c.EnrichedData,
+			&c.CreatedAt, &c.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning contact: %w", err)
+		}
+		contacts = append(contacts, c)
+	}
+	return contacts, nil
+}
+
 // Stats returns aggregated contact stats for the dashboard
 func (r *ContactRepo) Stats(ctx context.Context, userID uuid.UUID) (*model.ContactStats, error) {
 	stats := &model.ContactStats{ByCompany: make(map[string]int)}

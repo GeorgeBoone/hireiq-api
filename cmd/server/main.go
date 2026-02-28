@@ -73,8 +73,9 @@ func main() {
 	companyHandler := handler.NewCompanyHandler(yahooClient, claudeClient)
 	compareHandler := handler.NewCompareHandler(claudeClient, jobRepo, userRepo)
 	appHandler := handler.NewApplicationHandler(appRepo, jobRepo)
-	_ = noteRepo    // Will be used by notes handler
-	_ = contactRepo // Will be used by contacts handler
+	contactHandler := handler.NewContactHandler(contactRepo)
+	networkHandler := handler.NewNetworkHandler(jobRepo, contactRepo)
+	_ = noteRepo // Will be used by notes handler
 
 	// ── Middleware ────────────────────────────────────────
 	authMiddleware, err := middleware.NewAuthMiddleware(cfg.FirebaseProjectID)
@@ -153,11 +154,15 @@ func main() {
 		// api.POST("/jobs/:id/notes", noteHandler.Create)
 		// api.DELETE("/jobs/:id/notes/:noteId", noteHandler.Delete)
 
-		// Contacts (TODO: implement handlers)
-		// api.GET("/contacts", contactHandler.List)
-		// api.POST("/contacts", contactHandler.Create)
-		// api.PUT("/contacts/:id", contactHandler.Update)
-		// api.DELETE("/contacts/:id", contactHandler.Delete)
+		// Contacts
+		api.GET("/contacts", contactHandler.List)
+		api.POST("/contacts", contactHandler.Create)
+		api.PUT("/contacts/:id", contactHandler.Update)
+		api.DELETE("/contacts/:id", contactHandler.Delete)
+
+		// Network (company aggregation)
+		api.GET("/network/companies", networkHandler.ListCompanies)
+		api.GET("/network/companies/:company/detail", networkHandler.GetCompanyDetail)
 
 		// AI
 		api.POST("/ai/compare", compareHandler.Compare)

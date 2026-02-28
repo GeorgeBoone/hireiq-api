@@ -197,8 +197,71 @@ type JobFilter struct {
 	BookmarkedOnly bool
 }
 
+// ListCompanies returns aggregated company data from the user's saved jobs
+func (r *JobRepo) ListCompanies(ctx context.Context, userID uuid.UUID) ([]model.CompanySummary, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT j.company,
+		       COALESCE(MAX(j.company_logo), '') as company_logo,
+		       COALESCE(MAX(j.company_color), '') as company_color,
+		       COUNT(*) as job_count,
+		       (SELECT COUNT(*) FROM contacts c WHERE c.user_id = $1 AND LOWER(c.company) = LOWER(j.company)) as contact_count
+		FROM jobs j
+		WHERE j.user_id = $1
+		GROUP BY j.company
+		ORDER BY j.company ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("listing companies: %w", err)
+	}
+	defer rows.Close()
+
+	var companies []model.CompanySummary
+	for rows.Next() {
+		var c model.CompanySummary
+		if err := rows.Scan(&c.Company, &c.CompanyLogo, &c.CompanyColor, &c.JobCount, &c.ContactCount); err != nil {
+			return nil, fmt.Errorf("scanning company row: %w", err)
+		}
+		companies = append(companies, c)
+	}
+	return companies, nil
+}
+
+// ListByCompany returns all jobs for a specific company
+func (r *JobRepo) ListByCompany(ctx context.Context, userID uuid.UUID, company string) ([]model.Job, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, user_id, external_id, source, title, company, location,
+		       salary_range, job_type, description, tags, required_skills,
+		       preferred_skills, apply_url, hiring_email, company_logo,
+		       company_color, match_score, bookmarked, status, created_at, updated_at
+		FROM jobs
+		WHERE user_id = $1 AND LOWER(company) = LOWER($2)
+		ORDER BY created_at DESC
+	`, userID, company)
+	if err != nil {
+		return nil, fmt.Errorf("listing jobs by company: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []model.Job
+	for rows.Next() {
+		var j model.Job
+		err := rows.Scan(
+			&j.ID, &j.UserID, &j.ExternalID, &j.Source, &j.Title, &j.Company,
+			&j.Location, &j.SalaryRange, &j.JobType, &j.Description, &j.Tags,
+			&j.RequiredSkills, &j.PreferredSkills, &j.ApplyURL, &j.HiringEmail,
+			&j.CompanyLogo, &j.CompanyColor, &j.MatchScore, &j.Bookmarked,
+			&j.Status,
+			&j.CreatedAt, &j.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scanning job row: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, nil
+}
+
 // UpdateStatus updates only the status field of a job
-// Add this method to JobRepo in repository/jobs.go
 func (r *JobRepo) UpdateStatus(ctx context.Context, jobID, userID uuid.UUID, status string) error {
 	result, err := r.pool.Exec(ctx,
 		`UPDATE jobs SET status = $1, updated_at = now()

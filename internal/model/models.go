@@ -214,3 +214,12 @@ type ContactStats struct {
 	WithPhone   int            `json:"withPhone"`
 	ByCompany   map[string]int `json:"byCompany"`
 }
+
+// CompanySummary is an aggregated view of a company from the user's saved jobs
+type CompanySummary struct {
+	Company      string `json:"company"`
+	CompanyLogo  string `json:"companyLogo"`
+	CompanyColor string `json:"companyColor"`
+	JobCount     int    `json:"jobCount"`
+	ContactCount int    `json:"contactCount"`
+}
