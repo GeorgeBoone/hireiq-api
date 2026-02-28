@@ -158,20 +158,7 @@ func (c *ClaudeClient) ParseJobPosting(ctx context.Context, rawText string) (*Pa
 
 	// Extract the text content and parse as JSON
 	text := claudeResp.Content[0].Text
-
-	// Strip markdown code fences if Claude includes them
-	text = strings.TrimSpace(text)
-	if strings.HasPrefix(text, "```") {
-		// Remove opening ```json or ```
-		if idx := strings.Index(text, "\n"); idx != -1 {
-			text = text[idx+1:]
-		}
-		// Remove closing ```
-		if idx := strings.LastIndex(text, "```"); idx != -1 {
-			text = text[:idx]
-		}
-		text = strings.TrimSpace(text)
-	}
+	text = stripCodeFences(text)
 
 	var parsed ParsedJob
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
@@ -183,10 +170,12 @@ func (c *ClaudeClient) ParseJobPosting(ctx context.Context, rawText string) (*Pa
 
 // ── Fetch URL content ─────────────────────────────────
 
-// FetchURLContent retrieves the text content of a URL for parsing
+// FetchURLContent retrieves the text content of a URL for parsing.
+// It extracts JSON-LD structured data if available, strips HTML tags,
+// and attempts to fetch additional tab content from common ATS platforms.
 func FetchURLContent(ctx context.Context, url string) (string, error) {
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: 20 * time.Second,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -195,7 +184,9 @@ func FetchURLContent(ctx context.Context, url string) (string, error) {
 	}
 
 	// Set a browser-like user agent so job sites don't block us
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -207,17 +198,351 @@ func FetchURLContent(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("URL returned status %d", resp.StatusCode)
 	}
 
-	// Limit to 100KB to avoid massive pages
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 100*1024))
+	// Increase limit to 500KB to capture full page content including tabs
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 500*1024))
 	if err != nil {
 		return "", fmt.Errorf("reading URL content: %w", err)
 	}
 
-	return string(body), nil
+	html := string(body)
+	var parts []string
+
+	// 1. Extract JSON-LD structured data (highest quality — many ATS embed this)
+	jsonLD := extractAllJSONLD(html)
+	if jsonLD != "" {
+		parts = append(parts, "=== STRUCTURED JOB DATA (JSON-LD) ===\n"+jsonLD)
+	}
+
+	// 2. Extract content from common ATS embedded data patterns
+	atsData := extractATSData(html)
+	if atsData != "" {
+		parts = append(parts, "=== ATS JOB DATA ===\n"+atsData)
+	}
+
+	// 3. Strip HTML and extract visible text
+	cleanText := stripHTML(html)
+	// Collapse excessive whitespace
+	for strings.Contains(cleanText, "\n\n\n") {
+		cleanText = strings.ReplaceAll(cleanText, "\n\n\n", "\n\n")
+	}
+	cleanText = strings.TrimSpace(cleanText)
+
+	if cleanText != "" {
+		parts = append(parts, "=== PAGE TEXT ===\n"+cleanText)
+	}
+
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no content extracted from URL")
+	}
+
+	result := strings.Join(parts, "\n\n")
+
+	// Truncate to stay within reasonable limits for Claude
+	if len(result) > 80000 {
+		result = result[:80000]
+	}
+
+	return result, nil
+}
+
+// extractAllJSONLD finds all <script type="application/ld+json"> blocks and returns
+// any that look like job postings (JobPosting schema or contain job-related fields)
+func extractAllJSONLD(html string) string {
+	var results []string
+	searchHTML := html
+	ldTag := `<script type="application/ld+json"`
+
+	for {
+		startIdx := strings.Index(strings.ToLower(searchHTML), strings.ToLower(ldTag))
+		if startIdx == -1 {
+			break
+		}
+
+		// Find the closing > of the script tag
+		gtIdx := strings.Index(searchHTML[startIdx:], ">")
+		if gtIdx == -1 {
+			break
+		}
+		contentStart := startIdx + gtIdx + 1
+
+		// Find </script>
+		endIdx := strings.Index(strings.ToLower(searchHTML[contentStart:]), "</script>")
+		if endIdx == -1 {
+			break
+		}
+
+		jsonContent := strings.TrimSpace(searchHTML[contentStart : contentStart+endIdx])
+
+		// Check if this JSON-LD is job-related
+		lower := strings.ToLower(jsonContent)
+		if strings.Contains(lower, "jobposting") ||
+			strings.Contains(lower, "jobtitle") ||
+			strings.Contains(lower, "job_title") ||
+			strings.Contains(lower, "hiringorganization") ||
+			strings.Contains(lower, "basesalary") ||
+			strings.Contains(lower, "employmenttype") ||
+			strings.Contains(lower, "description") {
+			// Pretty-print if valid JSON
+			var prettyBuf bytes.Buffer
+			if err := json.Indent(&prettyBuf, []byte(jsonContent), "", "  "); err == nil {
+				results = append(results, prettyBuf.String())
+			} else {
+				results = append(results, jsonContent)
+			}
+		}
+
+		searchHTML = searchHTML[contentStart+endIdx:]
+	}
+
+	return strings.Join(results, "\n\n")
+}
+
+// extractATSData looks for common ATS platform data patterns embedded in script tags
+// (e.g., Workday, Taleo, Greenhouse, Lever store job data in JS variables or data attributes)
+func extractATSData(html string) string {
+	var parts []string
+
+	// Pattern 1: __NEXT_DATA__ (Next.js sites like Greenhouse, Ashby)
+	if data := extractBetween(html, `<script id="__NEXT_DATA__" type="application/json">`, `</script>`); data != "" {
+		// Extract just the job-related portion to avoid massive payloads
+		if trimmed := extractJobFromNextData(data); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+
+	// Pattern 2: window.__data or window.__INITIAL_STATE__ (common SPA pattern)
+	for _, prefix := range []string{
+		"window.__data", "window.__INITIAL_STATE__", "window.__JOB_DATA__",
+		"window.jobData", "window._initialData", "window.__PRELOADED_STATE__",
+	} {
+		if data := extractJSVariable(html, prefix); data != "" {
+			parts = append(parts, data)
+		}
+	}
+
+	// Pattern 3: data-automation attributes or data-job-* attributes
+	// Many ATS embed tab content in hidden divs with data attributes
+	for _, attr := range []string{
+		`data-tab="description"`, `data-tab="benefits"`, `data-tab="requirements"`,
+		`data-automation="jobDescription"`, `data-automation="jobBenefits"`,
+		`id="job-description"`, `id="job-benefits"`, `id="job-requirements"`,
+		`class="job-description"`, `class="job-details"`, `class="job-benefits"`,
+		`data-testid="job-description"`, `data-testid="benefits"`,
+	} {
+		if content := extractElementContent(html, attr); content != "" {
+			stripped := stripHTML(content)
+			if len(stripped) > 50 { // Only include if substantial
+				parts = append(parts, stripped)
+			}
+		}
+	}
+
+	return strings.Join(parts, "\n\n")
+}
+
+// extractBetween extracts content between two markers
+func extractBetween(html, startMarker, endMarker string) string {
+	startIdx := strings.Index(html, startMarker)
+	if startIdx == -1 {
+		return ""
+	}
+	contentStart := startIdx + len(startMarker)
+	endIdx := strings.Index(html[contentStart:], endMarker)
+	if endIdx == -1 {
+		return ""
+	}
+	return strings.TrimSpace(html[contentStart : contentStart+endIdx])
+}
+
+// extractJSVariable extracts the value assigned to a JS variable
+func extractJSVariable(html, varName string) string {
+	idx := strings.Index(html, varName)
+	if idx == -1 {
+		return ""
+	}
+	// Find the = sign
+	rest := html[idx+len(varName):]
+	eqIdx := strings.IndexByte(rest, '=')
+	if eqIdx == -1 || eqIdx > 5 {
+		return ""
+	}
+	rest = strings.TrimSpace(rest[eqIdx+1:])
+
+	// Find matching end (look for </script> or ;)
+	endIdx := strings.Index(rest, "</script>")
+	if endIdx == -1 {
+		endIdx = strings.Index(rest, ";\n")
+		if endIdx == -1 {
+			return ""
+		}
+	}
+	data := strings.TrimSpace(rest[:endIdx])
+	data = strings.TrimSuffix(data, ";")
+
+	// Only return if it looks like JSON
+	if (strings.HasPrefix(data, "{") || strings.HasPrefix(data, "[")) && len(data) > 50 {
+		// Truncate very large embedded data
+		if len(data) > 30000 {
+			data = data[:30000]
+		}
+		return data
+	}
+	return ""
+}
+
+// extractJobFromNextData extracts job-relevant data from Next.js __NEXT_DATA__
+func extractJobFromNextData(data string) string {
+	// Parse as JSON and try to find job-related keys
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
+		return ""
+	}
+
+	// Look for props.pageProps which usually contains the data
+	props, ok := parsed["props"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	pageProps, ok := props["pageProps"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	// Re-serialize just the pageProps (much smaller than full __NEXT_DATA__)
+	result, err := json.MarshalIndent(pageProps, "", "  ")
+	if err != nil {
+		return ""
+	}
+
+	output := string(result)
+	if len(output) > 30000 {
+		output = output[:30000]
+	}
+	return output
+}
+
+// extractElementContent finds an HTML element with a given attribute and returns its inner content
+func extractElementContent(html, attr string) string {
+	idx := strings.Index(html, attr)
+	if idx == -1 {
+		return ""
+	}
+
+	// Walk backward to find the opening <
+	start := idx
+	for start > 0 && html[start] != '<' {
+		start--
+	}
+
+	// Find the > that closes this opening tag
+	gtIdx := strings.Index(html[idx:], ">")
+	if gtIdx == -1 {
+		return ""
+	}
+	contentStart := idx + gtIdx + 1
+
+	// Determine the tag name
+	tagPart := html[start+1 : idx]
+	tagName := strings.Fields(tagPart)[0]
+
+	// Find the matching closing tag (handle nesting)
+	closeTag := "</" + tagName + ">"
+	openTag := "<" + tagName
+	depth := 1
+	pos := contentStart
+
+	for depth > 0 && pos < len(html) {
+		nextOpen := strings.Index(html[pos:], openTag)
+		nextClose := strings.Index(html[pos:], closeTag)
+
+		if nextClose == -1 {
+			break
+		}
+
+		if nextOpen != -1 && nextOpen < nextClose {
+			depth++
+			pos += nextOpen + len(openTag)
+		} else {
+			depth--
+			if depth == 0 {
+				return html[contentStart : pos+nextClose]
+			}
+			pos += nextClose + len(closeTag)
+		}
+	}
+
+	return ""
+}
+
+// stripHTML removes HTML tags and decodes common entities
+func stripHTML(html string) string {
+	var result strings.Builder
+	inTag := false
+	inScript := false
+	inStyle := false
+
+	lower := strings.ToLower(html)
+
+	for i := 0; i < len(html); i++ {
+		if i < len(html)-7 && lower[i:i+7] == "<script" {
+			inScript = true
+		}
+		if i < len(html)-9 && lower[i:i+9] == "</script>" {
+			inScript = false
+			i += 8
+			continue
+		}
+		if i < len(html)-6 && lower[i:i+6] == "<style" {
+			inStyle = true
+		}
+		if i < len(html)-8 && lower[i:i+8] == "</style>" {
+			inStyle = false
+			i += 7
+			continue
+		}
+		if inScript || inStyle {
+			continue
+		}
+
+		if html[i] == '<' {
+			inTag = true
+			// Add newline for block elements
+			if i < len(html)-3 {
+				tag := strings.ToLower(html[i:])
+				for _, block := range []string{"<br", "<p", "<div", "<h1", "<h2", "<h3", "<h4", "<li", "<tr"} {
+					if strings.HasPrefix(tag, block) {
+						result.WriteByte('\n')
+						break
+					}
+				}
+			}
+			continue
+		}
+		if html[i] == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			result.WriteByte(html[i])
+		}
+	}
+
+	text := result.String()
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+	text = strings.ReplaceAll(text, "&apos;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&#x27;", "'")
+	text = strings.ReplaceAll(text, "&#x2F;", "/")
+
+	return text
 }
 
 // ── Resume Critique ───────────────────────────────────
-// Add this to the bottom of internal/service/claude.go
 
 // CritiqueResult is the structured response from resume critique
 type CritiqueResult struct {
@@ -430,6 +755,138 @@ func (c *ClaudeClient) FixResumeIssue(ctx context.Context, resumeText, issueCat,
 	var result FixResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
 		return nil, fmt.Errorf("parsing fix suggestions: %w (raw: %s)", err, text)
+	}
+
+	return &result, nil
+}
+
+// ── Company Intel AI Estimation ────────────────────────
+
+// CompanyIntelAI is the AI-estimated data for private companies
+type CompanyIntelAI struct {
+	Company  string `json:"company"`
+	IsPublic bool   `json:"isPublic"`
+	Profile  struct {
+		Industry          string `json:"industry"`
+		Sector            string `json:"sector"`
+		FullTimeEmployees int64  `json:"fullTimeEmployees"`
+		Website           string `json:"website"`
+		City              string `json:"city"`
+		Country           string `json:"country"`
+		Summary           string `json:"summary"`
+		Founded           int    `json:"founded"`
+	} `json:"profile"`
+	Financials struct {
+		Valuation        string  `json:"valuation"`
+		EstimatedRevenue string  `json:"estimatedRevenue"`
+		RevenueGrowth    float64 `json:"revenueGrowth"`
+		ProfitMargins    float64 `json:"profitMargins"`
+	} `json:"financials"`
+	Officers []struct {
+		Name  string `json:"name"`
+		Title string `json:"title"`
+	} `json:"officers"`
+}
+
+const companyIntelSystemPrompt = `You are a company research analyst. Given a company name, provide your best estimates of company data.
+
+Respond with ONLY a JSON object (no markdown, no backticks, no explanation):
+{
+  "company": "Company Name",
+  "isPublic": false,
+  "profile": {
+    "industry": "Software Development",
+    "sector": "Technology",
+    "fullTimeEmployees": 500,
+    "website": "https://company.com",
+    "city": "San Francisco",
+    "country": "United States",
+    "summary": "Brief 2-3 sentence description of what the company does.",
+    "founded": 2015
+  },
+  "financials": {
+    "valuation": "$500M",
+    "estimatedRevenue": "$30M-$50M annual",
+    "revenueGrowth": 0.25,
+    "profitMargins": 0.10
+  },
+  "officers": [
+    {"name": "Jane Doe", "title": "CEO & Founder"},
+    {"name": "John Smith", "title": "CTO"}
+  ]
+}
+
+Rules:
+- Use your knowledge to provide reasonable estimates. Be transparent these are estimates.
+- For financials, use ranges for estimated revenue (e.g. "$10M-$20M annual").
+- For valuation, use last known funding round or reasonable estimate.
+- Include 2-5 key executives you know of.
+- If you genuinely don't know something, use 0 for numbers and empty strings for text.
+- isPublic should be false for private companies.`
+
+// EstimateCompanyIntel uses Claude to estimate company data for private companies
+func (c *ClaudeClient) EstimateCompanyIntel(ctx context.Context, company string) (*CompanyIntelAI, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("Claude API key not configured")
+	}
+
+	reqBody := claudeRequest{
+		Model:     "claude-sonnet-4-5-20250929",
+		MaxTokens: 1500,
+		System:    companyIntelSystemPrompt,
+		Messages: []claudeMessage{
+			{Role: "user", Content: "Provide company intelligence data for: " + company},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling Claude API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var claudeResp claudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return nil, fmt.Errorf("parsing Claude response: %w", err)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return nil, fmt.Errorf("empty response from Claude")
+	}
+
+	text := strings.TrimSpace(claudeResp.Content[0].Text)
+	text = stripCodeFences(text)
+
+	var result CompanyIntelAI
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("parsing company intel: %w (raw: %s)", err, text)
+	}
+
+	if result.Company == "" {
+		result.Company = company
 	}
 
 	return &result, nil

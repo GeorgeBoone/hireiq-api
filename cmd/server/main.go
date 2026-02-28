@@ -59,15 +59,18 @@ func main() {
 
 	// ── Services ──────────────────────────────────────────
 	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
+	yahooClient := service.NewYahooFinanceClient()
 	jsearchClient := service.NewJSearchClient(cfg.RapidAPIKey)
 	feedService := service.NewFeedService(jsearchClient, feedRepo, userRepo)
 
 	// ── Handlers ─────────────────────────────────────────
+	resumeHandler := handler.NewResumeHandler(claudeClient, jobRepo)
 	authHandler := handler.NewAuthHandler(userRepo)
 	profileHandler := handler.NewProfileHandler(userRepo)
 	jobHandler := handler.NewJobHandler(jobRepo)
 	parseHandler := handler.NewParseHandler(claudeClient)
 	feedHandler := handler.NewFeedHandler(feedService, feedRepo)
+	companyHandler := handler.NewCompanyHandler(yahooClient, claudeClient)
 	_ = appRepo     // Will be used by application handler
 	_ = noteRepo    // Will be used by notes handler
 	_ = contactRepo // Will be used by contacts handler
@@ -158,13 +161,17 @@ func main() {
 		// api.POST("/ai/fix-suggestion", aiHandler.FixSuggestion)
 
 		// Resume (TODO: implement handlers)
-		// api.POST("/resume/upload", resumeHandler.Upload)
-		// api.POST("/resume/critique", resumeHandler.Critique)
-		// api.GET("/resume/latest", resumeHandler.Latest)
+		 api.POST("/resume/upload", resumeHandler.Upload)
+		 api.POST("/resume/critique", resumeHandler.Critique)
+		 //api.GET("/resume/latest", resumeHandler.Latest)
+		 api.POST("/resume/fix", resumeHandler.Fix)
 
 		// Dashboard (TODO: implement handlers)
 		// api.GET("/dashboard/summary", dashHandler.Summary)
 		// api.GET("/dashboard/calendar", dashHandler.Calendar)
+
+		//company intel
+		api.GET("/company/intel", companyHandler.GetIntel)
 	}
 
 	// ── Server ───────────────────────────────────────────
@@ -172,7 +179,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

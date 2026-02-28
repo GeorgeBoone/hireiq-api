@@ -23,6 +23,9 @@ type Config struct {
 	ClaudeAPIKey  string
 	ClaudeBaseURL string
 
+	// Job Feed
+	RapidAPIKey string
+
 	// Cloud Storage
 	StorageBucket string
 
@@ -44,6 +47,7 @@ func Load() (*Config, error) {
 		FirebaseProjectID: getEnv("FIREBASE_PROJECT_ID", ""),
 		ClaudeAPIKey:   getEnv("CLAUDE_API_KEY", ""),
 		ClaudeBaseURL:  getEnv("CLAUDE_BASE_URL", "https://api.anthropic.com"),
+		RapidAPIKey:    getEnv("RAPIDAPI_KEY", ""),
 		StorageBucket:  getEnv("STORAGE_BUCKET", ""),
 		RateLimitRPS:   getEnvInt("RATE_LIMIT_RPS", 10),
 		AllowedOrigins: []string{
