@@ -71,6 +71,7 @@ func main() {
 	parseHandler := handler.NewParseHandler(claudeClient)
 	feedHandler := handler.NewFeedHandler(feedService, feedRepo)
 	companyHandler := handler.NewCompanyHandler(yahooClient, claudeClient)
+	compareHandler := handler.NewCompareHandler(claudeClient, jobRepo, userRepo)
 	_ = appRepo     // Will be used by application handler
 	_ = noteRepo    // Will be used by notes handler
 	_ = contactRepo // Will be used by contacts handler
@@ -156,9 +157,8 @@ func main() {
 		// api.PUT("/contacts/:id", contactHandler.Update)
 		// api.DELETE("/contacts/:id", contactHandler.Delete)
 
-		// AI (TODO: implement handlers)
-		// api.POST("/ai/compare", aiHandler.Compare)
-		// api.POST("/ai/fix-suggestion", aiHandler.FixSuggestion)
+		// AI
+		api.POST("/ai/compare", compareHandler.Compare)
 
 		// Resume (TODO: implement handlers)
 		 api.POST("/resume/upload", resumeHandler.Upload)

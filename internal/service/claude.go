@@ -892,6 +892,132 @@ func (c *ClaudeClient) EstimateCompanyIntel(ctx context.Context, company string)
 	return &result, nil
 }
 
+// ── Job Comparison ─────────────────────────────────────
+
+// CompareResult is the structured response from job comparison
+type CompareResult struct {
+	Recommendation       string              `json:"recommendation"`       // label of recommended job ("Job A")
+	RecommendationReason string              `json:"recommendationReason"` // 1-2 sentence reason
+	Rankings             []JobRanking        `json:"rankings"`             // ordered best to worst
+	Dimensions           []CompareDimension  `json:"dimensions"`           // per-dimension breakdown
+	Summary              string              `json:"summary"`              // overall 2-3 sentence recommendation
+	Caveats              []string            `json:"caveats"`              // things to consider
+}
+
+type JobRanking struct {
+	Label string `json:"label"` // "Job A", "Job B", etc.
+	Rank  int    `json:"rank"`  // 1 = best
+	Score int    `json:"score"` // overall 0-100
+}
+
+type CompareDimension struct {
+	Name   string         `json:"name"`   // e.g. "Compensation"
+	Winner string         `json:"winner"` // label ("Job A") or "tie"
+	Scores map[string]int `json:"scores"` // label -> score 0-100
+	Notes  string         `json:"notes"`  // short explanation
+}
+
+const compareSystemPrompt = `You are HireIQ's job comparison AI. Compare job opportunities for a candidate and recommend the best fit.
+
+Jobs are labeled "Job A", "Job B", etc. Respond with ONLY a JSON object (no markdown, no backticks):
+{
+  "recommendation": "Job A",
+  "recommendationReason": "Brief 1-2 sentence reason this job is the best fit.",
+  "rankings": [
+    {"label": "Job A", "rank": 1, "score": 85},
+    {"label": "Job B", "rank": 2, "score": 72}
+  ],
+  "dimensions": [
+    {"name": "Compensation", "winner": "Job A", "scores": {"Job A": 85, "Job B": 72}, "notes": "Job A offers $20K higher base with similar equity."},
+    {"name": "Growth Potential", "winner": "Job B", "scores": {"Job A": 60, "Job B": 88}, "notes": "Company B is Series A with rapid scaling trajectory."},
+    {"name": "Skill Alignment", "winner": "tie", "scores": {"Job A": 78, "Job B": 80}, "notes": "Both roles align well with the candidate's skills."},
+    {"name": "Work-Life Balance", "winner": "Job A", "scores": {"Job A": 90, "Job B": 65}, "notes": "Job A is fully remote."},
+    {"name": "Company Stability", "winner": "Job A", "scores": {"Job A": 82, "Job B": 55}, "notes": "Company A is profitable with 500+ employees."},
+    {"name": "Culture Fit", "winner": "Job B", "scores": {"Job A": 70, "Job B": 85}, "notes": "Company B matches candidate preferences."}
+  ],
+  "summary": "Overall recommendation with nuance. 2-3 sentences.",
+  "caveats": ["Things the candidate should verify", "Up to 3 caveats"]
+}
+
+Rules:
+- Score each dimension 0-100 for ALL jobs being compared.
+- Rankings: order jobs from best (rank 1) to worst. Overall score reflects all dimensions weighted by candidate fit.
+- Be honest about trade-offs. Don't oversell any option.
+- If info is missing for a dimension, estimate based on what's available and note the uncertainty.
+- Consider the candidate's stated preferences (salary range, work style, location) heavily.
+- Always provide exactly 6 dimensions in the order: Compensation, Growth Potential, Skill Alignment, Work-Life Balance, Company Stability, Culture Fit.
+- The "scores" map must include an entry for every job label.
+- For "winner", use the job label or "tie" if scores are within 5 points.`
+
+// CompareJobs sends job details to Claude for structured comparison analysis
+func (c *ClaudeClient) CompareJobs(ctx context.Context, jobDescriptions string, userProfile string) (*CompareResult, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("Claude API key not configured")
+	}
+
+	userContent := fmt.Sprintf(
+		"Compare these jobs for the candidate and return the JSON analysis:\n\n%s\n\n=== CANDIDATE PROFILE ===\n%s",
+		jobDescriptions, userProfile,
+	)
+
+	reqBody := claudeRequest{
+		Model:     "claude-sonnet-4-5-20250929",
+		MaxTokens: 2500,
+		System:    compareSystemPrompt,
+		Messages: []claudeMessage{
+			{Role: "user", Content: userContent},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling Claude API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var claudeResp claudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return nil, fmt.Errorf("parsing Claude response: %w", err)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return nil, fmt.Errorf("empty response from Claude")
+	}
+
+	text := strings.TrimSpace(claudeResp.Content[0].Text)
+	text = stripCodeFences(text)
+
+	var result CompareResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("parsing comparison result: %w (raw: %s)", err, text)
+	}
+
+	return &result, nil
+}
+
 // stripCodeFences removes markdown ```json ... ``` wrappers
 func stripCodeFences(text string) string {
 	if strings.HasPrefix(text, "```") {

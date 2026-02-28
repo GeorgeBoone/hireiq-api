@@ -82,7 +82,7 @@ func (r *JobRepo) FindByID(ctx context.Context, id uuid.UUID, userID uuid.UUID) 
 		SELECT id, user_id, external_id, source, title, company, location,
 		       salary_range, job_type, description, tags, required_skills,
 		       preferred_skills, apply_url, hiring_email, company_logo,
-		       company_color, match_score, bookmarked, created_at, updated_at
+		       company_color, match_score, bookmarked, status, created_at, updated_at
 		FROM jobs
 		WHERE id = $1 AND user_id = $2
 	`, id, userID).Scan(
