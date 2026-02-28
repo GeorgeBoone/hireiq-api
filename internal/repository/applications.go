@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -176,6 +177,29 @@ func (r *ApplicationRepo) GetHistory(ctx context.Context, applicationID uuid.UUI
 		history = append(history, h)
 	}
 	return history, nil
+}
+
+// UpdateDetails updates follow-up fields without changing status
+func (r *ApplicationRepo) UpdateDetails(ctx context.Context, id, userID uuid.UUID, nextStep string, followUpDate *time.Time, followUpType string, followUpUrgent bool) (*model.Application, error) {
+	var updated model.Application
+	err := r.pool.QueryRow(ctx, `
+		UPDATE applications
+		SET next_step = $3, follow_up_date = $4, follow_up_type = $5,
+		    follow_up_urgent = $6, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, job_id, status, applied_at, next_step,
+		          follow_up_date, follow_up_type, follow_up_urgent,
+		          created_at, updated_at
+	`, id, userID, nextStep, followUpDate, followUpType, followUpUrgent).Scan(
+		&updated.ID, &updated.UserID, &updated.JobID, &updated.Status,
+		&updated.AppliedAt, &updated.NextStep, &updated.FollowUpDate,
+		&updated.FollowUpType, &updated.FollowUpUrgent,
+		&updated.CreatedAt, &updated.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("updating application details: %w", err)
+	}
+	return &updated, nil
 }
 
 // CountByStatus returns pipeline counts for the dashboard

@@ -12,10 +12,11 @@ import (
 
 type JobHandler struct {
 	jobRepo *repository.JobRepo
+	appRepo *repository.ApplicationRepo
 }
 
-func NewJobHandler(jobRepo *repository.JobRepo) *JobHandler {
-	return &JobHandler{jobRepo: jobRepo}
+func NewJobHandler(jobRepo *repository.JobRepo, appRepo *repository.ApplicationRepo) *JobHandler {
+	return &JobHandler{jobRepo: jobRepo, appRepo: appRepo}
 }
 
 // ListJobs handles GET /jobs
@@ -215,6 +216,16 @@ func (h *JobHandler) UpdateJobStatus(c *gin.Context) {
 		log.Error().Err(err).Msg("Failed to update job status")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
 		return
+	}
+
+	// Sync application record if one exists (keeps pipeline tracker in sync with Kanban)
+	if h.appRepo != nil {
+		app, err := h.appRepo.FindByJobID(c.Request.Context(), userID, jobID)
+		if err == nil && app != nil && app.Status != req.Status {
+			if _, syncErr := h.appRepo.UpdateStatus(c.Request.Context(), app.ID, userID, req.Status, "Updated via Kanban board"); syncErr != nil {
+				log.Warn().Err(syncErr).Msg("Failed to sync application status from Kanban")
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": req.Status})

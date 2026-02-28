@@ -67,12 +67,12 @@ func main() {
 	resumeHandler := handler.NewResumeHandler(claudeClient, jobRepo)
 	authHandler := handler.NewAuthHandler(userRepo)
 	profileHandler := handler.NewProfileHandler(userRepo)
-	jobHandler := handler.NewJobHandler(jobRepo)
+	jobHandler := handler.NewJobHandler(jobRepo, appRepo)
 	parseHandler := handler.NewParseHandler(claudeClient)
 	feedHandler := handler.NewFeedHandler(feedService, feedRepo)
 	companyHandler := handler.NewCompanyHandler(yahooClient, claudeClient)
 	compareHandler := handler.NewCompareHandler(claudeClient, jobRepo, userRepo)
-	_ = appRepo     // Will be used by application handler
+	appHandler := handler.NewApplicationHandler(appRepo, jobRepo)
 	_ = noteRepo    // Will be used by notes handler
 	_ = contactRepo // Will be used by contacts handler
 
@@ -141,10 +141,12 @@ func main() {
 		api.POST("/feed/:id/dismiss", feedHandler.DismissFeedJob)
 		api.POST("/feed/:id/save", feedHandler.SaveFeedJob)
 
-		// Applications (TODO: implement handlers)
-		// api.GET("/jobs/:id/application", appHandler.Get)
-		// api.POST("/jobs/:id/application", appHandler.Create)
-		// api.PUT("/jobs/:id/application", appHandler.UpdateStatus)
+		// Applications (pipeline tracking)
+		api.GET("/jobs/:id/application", appHandler.Get)
+		api.POST("/jobs/:id/application", appHandler.Create)
+		api.PUT("/jobs/:id/application/status", appHandler.UpdateStatus)
+		api.PUT("/jobs/:id/application/details", appHandler.UpdateDetails)
+		api.GET("/jobs/:id/application/history", appHandler.GetHistory)
 
 		// Notes (TODO: implement handlers)
 		// api.GET("/jobs/:id/notes", noteHandler.List)
