@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -257,4 +258,55 @@ func (r *ContactRepo) Stats(ctx context.Context, userID uuid.UUID) (*model.Conta
 	}
 
 	return stats, nil
+}
+
+// BulkCreate inserts multiple contacts, skipping duplicates (same name+company for the user).
+// Returns the count of successfully inserted rows and skipped duplicates.
+func (r *ContactRepo) BulkCreate(ctx context.Context, userID uuid.UUID, contacts []model.Contact) (inserted int, skipped int, err error) {
+	if len(contacts) == 0 {
+		return 0, 0, nil
+	}
+
+	// Fetch existing contacts to check for duplicates (application-level dedup)
+	existing, err := r.List(ctx, userID, "")
+	if err != nil {
+		return 0, 0, fmt.Errorf("fetching existing contacts: %w", err)
+	}
+
+	existingSet := make(map[string]bool, len(existing))
+	for _, e := range existing {
+		key := strings.ToLower(e.Name) + "||" + strings.ToLower(e.Company)
+		existingSet[key] = true
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var insertedCount int
+	for _, c := range contacts {
+		key := strings.ToLower(c.Name) + "||" + strings.ToLower(c.Company)
+		if existingSet[key] {
+			skipped++
+			continue
+		}
+
+		_, err := tx.Exec(ctx, `
+			INSERT INTO contacts (user_id, name, company, role, connection, phone, email, tip)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, userID, c.Name, c.Company, c.Role, c.Connection, c.Phone, c.Email, c.Tip)
+		if err != nil {
+			return 0, 0, fmt.Errorf("inserting contact %q: %w", c.Name, err)
+		}
+		existingSet[key] = true // prevent intra-batch duplicates
+		insertedCount++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return insertedCount, skipped, nil
 }

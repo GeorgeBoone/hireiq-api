@@ -168,6 +168,7 @@ func main() {
 		// Contacts
 		api.GET("/contacts", contactHandler.List)
 		api.POST("/contacts", contactHandler.Create)
+		api.POST("/contacts/import/linkedin", contactHandler.ImportLinkedIn)
 		api.PUT("/contacts/:id", contactHandler.Update)
 		api.DELETE("/contacts/:id", contactHandler.Delete)
 
