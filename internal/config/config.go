@@ -32,6 +32,15 @@ type Config struct {
 	// Rate Limiting
 	RateLimitRPS int
 
+	// Stripe
+	StripeSecretKey      string
+	StripeWebhookSecret  string
+	StripePriceProMo     string // Stripe Price ID for Pro monthly
+	StripePriceProAn     string // Stripe Price ID for Pro annual
+	StripePriceProPlusMo string // Stripe Price ID for Pro+ monthly
+	StripePriceProPlusAn string // Stripe Price ID for Pro+ annual
+	FrontendURL          string
+
 	// CORS
 	AllowedOrigins []string
 }
@@ -49,7 +58,14 @@ func Load() (*Config, error) {
 		ClaudeBaseURL:  getEnv("CLAUDE_BASE_URL", "https://api.anthropic.com"),
 		RapidAPIKey:    getEnv("RAPIDAPI_KEY", ""),
 		StorageBucket:  getEnv("STORAGE_BUCKET", ""),
-		RateLimitRPS:   getEnvInt("RATE_LIMIT_RPS", 10),
+		RateLimitRPS:        getEnvInt("RATE_LIMIT_RPS", 10),
+		StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
+		StripePriceProMo:    getEnv("STRIPE_PRICE_PRO_MONTHLY", ""),
+		StripePriceProAn:    getEnv("STRIPE_PRICE_PRO_ANNUAL", ""),
+		StripePriceProPlusMo: getEnv("STRIPE_PRICE_PROPLUS_MONTHLY", ""),
+		StripePriceProPlusAn: getEnv("STRIPE_PRICE_PROPLUS_ANNUAL", ""),
+		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:5173"),
 		AllowedOrigins: []string{
 			"http://localhost:5173",
 			"https://hireiq.app",

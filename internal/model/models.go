@@ -223,3 +223,67 @@ type CompanySummary struct {
 	JobCount     int    `json:"jobCount"`
 	ContactCount int    `json:"contactCount"`
 }
+
+// ── Stripe / Billing ────────────────────────────────────
+
+// StripeCustomer links a HireIQ user to their Stripe customer record
+type StripeCustomer struct {
+	ID               uuid.UUID `json:"id"`
+	UserID           uuid.UUID `json:"userId"`
+	StripeCustomerID string    `json:"stripeCustomerId"`
+	Email            string    `json:"email"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+// Subscription tracks a user's active Stripe subscription
+type Subscription struct {
+	ID                uuid.UUID  `json:"id"`
+	UserID            uuid.UUID  `json:"userId"`
+	StripeSubID       string     `json:"stripeSubId,omitempty"`
+	StripePriceID     string     `json:"stripePriceId,omitempty"`
+	Plan              string     `json:"plan"`
+	Status            string     `json:"status"`
+	CurrentPeriodEnd  *time.Time `json:"currentPeriodEnd"`
+	CancelAtPeriodEnd bool       `json:"cancelAtPeriodEnd"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
+// Subscription plan constants
+const (
+	PlanFree    = "free"
+	PlanPro     = "pro"
+	PlanProPlus = "pro_plus"
+)
+
+// Subscription status constants
+const (
+	SubStatusActive   = "active"
+	SubStatusPastDue  = "past_due"
+	SubStatusCanceled = "canceled"
+	SubStatusTrialing = "trialing"
+)
+
+// PlanLevel returns a numeric level for plan comparison (higher = more features)
+func PlanLevel(plan string) int {
+	switch plan {
+	case PlanPro:
+		return 1
+	case PlanProPlus:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// PaymentEvent stores a webhook event for audit
+type PaymentEvent struct {
+	ID               uuid.UUID `json:"id"`
+	StripeEventID    string    `json:"stripeEventId"`
+	EventType        string    `json:"eventType"`
+	StripeCustomerID string    `json:"stripeCustomerId,omitempty"`
+	Data             []byte    `json:"data"`
+	Processed        bool      `json:"processed"`
+	CreatedAt        time.Time `json:"createdAt"`
+}

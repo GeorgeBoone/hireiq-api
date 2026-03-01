@@ -56,12 +56,15 @@ func main() {
 	noteRepo := repository.NewNoteRepo(pool)
 	contactRepo := repository.NewContactRepo(pool)
 	feedRepo := repository.NewFeedRepo(pool)
+	stripeCustomerRepo := repository.NewStripeCustomerRepo(pool)
+	subscriptionRepo := repository.NewSubscriptionRepo(pool)
 
 	// ── Services ──────────────────────────────────────────
 	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
 	yahooClient := service.NewYahooFinanceClient()
 	jsearchClient := service.NewJSearchClient(cfg.RapidAPIKey)
 	feedService := service.NewFeedService(jsearchClient, feedRepo, userRepo)
+	stripeService := service.NewStripeService(cfg, stripeCustomerRepo, subscriptionRepo, userRepo)
 
 	// ── Handlers ─────────────────────────────────────────
 	resumeHandler := handler.NewResumeHandler(claudeClient, jobRepo)
@@ -75,6 +78,7 @@ func main() {
 	appHandler := handler.NewApplicationHandler(appRepo, jobRepo)
 	contactHandler := handler.NewContactHandler(contactRepo)
 	networkHandler := handler.NewNetworkHandler(jobRepo, contactRepo)
+	billingHandler := handler.NewBillingHandler(stripeService, subscriptionRepo)
 	_ = noteRepo // Will be used by notes handler
 
 	// ── Middleware ────────────────────────────────────────
@@ -112,6 +116,9 @@ func main() {
 		})
 	})
 
+	// Stripe webhook (unauthenticated — verified by Stripe signature)
+	r.POST("/billing/webhook", billingHandler.HandleWebhook)
+
 	// ── Authenticated Routes ─────────────────────────────
 	api := r.Group("/", authMiddleware.Authenticate(), rateLimiter.Limit())
 	{
@@ -126,10 +133,14 @@ func main() {
 		api.PUT("/profile", profileHandler.UpdateProfile)
 		api.PUT("/profile/skills", profileHandler.UpdateSkills)
 
+		// Billing (subscription management)
+		api.GET("/billing/subscription", billingHandler.GetSubscription)
+		api.POST("/billing/checkout", billingHandler.CreateCheckout)
+		api.POST("/billing/portal", billingHandler.CreatePortal)
+
 		// Jobs
 		api.GET("/jobs", jobHandler.ListJobs)
 		api.POST("/jobs", jobHandler.CreateJob)
-		api.POST("/jobs/parse", parseHandler.ParseJobPosting)
 		api.GET("/jobs/:id", jobHandler.GetJob)
 		api.PUT("/jobs/:id", jobHandler.UpdateJob)
 		api.DELETE("/jobs/:id", jobHandler.DeleteJob)
@@ -164,21 +175,21 @@ func main() {
 		api.GET("/network/companies", networkHandler.ListCompanies)
 		api.GET("/network/companies/:company/detail", networkHandler.GetCompanyDetail)
 
-		// AI
-		api.POST("/ai/compare", compareHandler.Compare)
+		// ── Pro+ features (require Pro plan) ─────────────
+		requirePro := middleware.RequirePlan("pro", subscriptionRepo)
 
-		// Resume (TODO: implement handlers)
-		 api.POST("/resume/upload", resumeHandler.Upload)
-		 api.POST("/resume/critique", resumeHandler.Critique)
-		 //api.GET("/resume/latest", resumeHandler.Latest)
-		 api.POST("/resume/fix", resumeHandler.Fix)
+		api.POST("/jobs/parse", requirePro, parseHandler.ParseJobPosting)
+		api.POST("/ai/compare", requirePro, compareHandler.Compare)
+		api.GET("/company/intel", requirePro, companyHandler.GetIntel)
+
+		// Resume
+		api.POST("/resume/upload", resumeHandler.Upload)
+		api.POST("/resume/critique", requirePro, resumeHandler.Critique)
+		api.POST("/resume/fix", requirePro, resumeHandler.Fix)
 
 		// Dashboard (TODO: implement handlers)
 		// api.GET("/dashboard/summary", dashHandler.Summary)
 		// api.GET("/dashboard/calendar", dashHandler.Calendar)
-
-		//company intel
-		api.GET("/company/intel", companyHandler.GetIntel)
 	}
 
 	// ── Server ───────────────────────────────────────────
