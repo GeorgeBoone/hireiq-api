@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -9,6 +11,7 @@ import (
 	"github.com/yourusername/hireiq-api/internal/middleware"
 	"github.com/yourusername/hireiq-api/internal/model"
 	"github.com/yourusername/hireiq-api/internal/repository"
+	"github.com/yourusername/hireiq-api/internal/service"
 )
 
 type AuthHandler struct {
@@ -60,11 +63,12 @@ func (h *AuthHandler) GoogleSignIn(c *gin.Context) {
 
 // ProfileHandler handles profile CRUD
 type ProfileHandler struct {
-	userRepo *repository.UserRepo
+	userRepo    *repository.UserRepo
+	feedService *service.FeedService
 }
 
-func NewProfileHandler(userRepo *repository.UserRepo) *ProfileHandler {
-	return &ProfileHandler{userRepo: userRepo}
+func NewProfileHandler(userRepo *repository.UserRepo, feedService *service.FeedService) *ProfileHandler {
+	return &ProfileHandler{userRepo: userRepo, feedService: feedService}
 }
 
 // GetProfile handles GET /profile
@@ -105,6 +109,24 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
+	// Re-score existing feed jobs in the background so match scores
+	// reflect the updated profile (target roles, skills, etc.)
+	if h.feedService != nil {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			rescored, err := h.feedService.RescoreUserFeed(bgCtx, userID)
+			if err != nil {
+				log.Error().Err(err).Str("userId", userID.String()).Msg("Background feed rescore failed")
+				return
+			}
+			log.Info().
+				Str("userId", userID.String()).
+				Int("rescored", rescored).
+				Msg("Background feed rescore complete after profile update")
+		}()
+	}
+
 	c.JSON(http.StatusOK, updated)
 }
 
@@ -131,6 +153,12 @@ func (h *ProfileHandler) UpdateSkills(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"skills": req.Skills})
+}
+
+// GetRoleSuggestions returns the curated list of target role suggestions
+// GET /profile/roles
+func (h *ProfileHandler) GetRoleSuggestions(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"roles": service.RoleSuggestions})
 }
 
 // getUserID extracts and parses the user UUID from context

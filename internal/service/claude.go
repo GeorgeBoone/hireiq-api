@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/yourusername/hireiq-api/internal/model"
 )
 
 // ClaudeClient wraps the Anthropic Messages API
@@ -52,6 +55,68 @@ type claudeResponse struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
+}
+
+// callClaude sends a request to the Anthropic Messages API, parses the JSON
+// response, and unmarshals it into the provided result pointer. All Claude
+// methods should use this to avoid duplicating HTTP + parse logic.
+func (c *ClaudeClient) callClaude(ctx context.Context, systemPrompt, userContent string, maxTokens int, result interface{}) error {
+	if c.apiKey == "" {
+		return fmt.Errorf("Claude API key not configured")
+	}
+
+	reqBody := claudeRequest{
+		Model:     "claude-sonnet-4-5-20250929",
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
+		Messages:  []claudeMessage{{Role: "user", Content: userContent}},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("calling Claude API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var claudeResp claudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return fmt.Errorf("parsing Claude response: %w", err)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return fmt.Errorf("empty response from Claude")
+	}
+
+	text := strings.TrimSpace(claudeResp.Content[0].Text)
+	text = stripCodeFences(text)
+
+	if err := json.Unmarshal([]byte(text), result); err != nil {
+		return fmt.Errorf("parsing result JSON: %w (raw: %s)", err, text)
+	}
+
+	return nil
 }
 
 // ── Parsed job result ─────────────────────────────────
@@ -102,70 +167,11 @@ Rules:
 
 // ParseJobPosting sends raw text (or fetched URL content) to Claude for extraction
 func (c *ClaudeClient) ParseJobPosting(ctx context.Context, rawText string) (*ParsedJob, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("Claude API key not configured")
+	var result ParsedJob
+	if err := c.callClaude(ctx, parseSystemPrompt, "Parse this job posting and return the JSON:\n\n"+rawText, 1500, &result); err != nil {
+		return nil, err
 	}
-
-	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-5-20250929",
-		MaxTokens: 1500,
-		System:    parseSystemPrompt,
-		Messages: []claudeMessage{
-			{
-				Role:    "user",
-				Content: "Parse this job posting and return the JSON:\n\n" + rawText,
-			},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Claude API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return nil, fmt.Errorf("parsing Claude response: %w", err)
-	}
-
-	if len(claudeResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from Claude")
-	}
-
-	// Extract the text content and parse as JSON
-	text := claudeResp.Content[0].Text
-	text = stripCodeFences(text)
-
-	var parsed ParsedJob
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return nil, fmt.Errorf("parsing extracted job data: %w (raw: %s)", err, text)
-	}
-
-	return &parsed, nil
+	return &result, nil
 }
 
 // ── Fetch URL content ─────────────────────────────────
@@ -542,6 +548,45 @@ func stripHTML(html string) string {
 	return text
 }
 
+// truncateUTF8 safely truncates a string to maxLen bytes without
+// splitting multi-byte UTF-8 characters. Appends "..." if truncated.
+func truncateUTF8(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	// Walk back from maxLen until we hit a valid rune boundary
+	for maxLen > 0 && !utf8.RuneStart(s[maxLen]) {
+		maxLen--
+	}
+	return s[:maxLen] + "..."
+}
+
+// sanitizeUTF8 replaces invalid UTF-8 byte sequences with the Unicode
+// replacement character. This prevents PostgreSQL from rejecting inserts.
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	// strings.ToValidUTF8 replaces invalid bytes with the replacement char
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
+// sanitizeFeedJob ensures all string fields in a FeedJob contain valid UTF-8.
+// Call this before any database insert to prevent encoding errors.
+func sanitizeFeedJob(job *model.FeedJob) {
+	job.Title = sanitizeUTF8(job.Title)
+	job.Company = sanitizeUTF8(job.Company)
+	job.Location = sanitizeUTF8(job.Location)
+	job.SalaryText = sanitizeUTF8(job.SalaryText)
+	job.JobType = sanitizeUTF8(job.JobType)
+	job.Description = sanitizeUTF8(job.Description)
+	job.ApplyURL = sanitizeUTF8(job.ApplyURL)
+	job.CompanyLogo = sanitizeUTF8(job.CompanyLogo)
+	for i, s := range job.RequiredSkills {
+		job.RequiredSkills[i] = sanitizeUTF8(s)
+	}
+}
+
 // ── Resume Critique ───────────────────────────────────
 
 // CritiqueResult is the structured response from resume critique
@@ -589,70 +634,14 @@ Guidelines:
 
 // CritiqueResume sends a resume to Claude for structured analysis
 func (c *ClaudeClient) CritiqueResume(ctx context.Context, resumeText, jobContext string) (*CritiqueResult, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("Claude API key not configured")
-	}
-
 	userContent := "Analyze this resume and return the JSON critique:\n\n" + resumeText
 	if jobContext != "" {
 		userContent += "\n\n---\n" + jobContext
 	}
-
-	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-5-20250929",
-		MaxTokens: 2000,
-		System:    critiqueSystemPrompt,
-		Messages: []claudeMessage{
-			{Role: "user", Content: userContent},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Claude API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return nil, fmt.Errorf("parsing Claude response: %w", err)
-	}
-
-	if len(claudeResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from Claude")
-	}
-
-	text := strings.TrimSpace(claudeResp.Content[0].Text)
-	text = stripCodeFences(text)
-
 	var result CritiqueResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("parsing critique result: %w (raw: %s)", err, text)
+	if err := c.callClaude(ctx, critiqueSystemPrompt, userContent, 2000, &result); err != nil {
+		return nil, err
 	}
-
 	return &result, nil
 }
 
@@ -690,10 +679,6 @@ Keep suggestions directly tied to the specific issue. Be concrete — use actual
 
 // FixResumeIssue gets before/after fix suggestions for a specific resume issue
 func (c *ClaudeClient) FixResumeIssue(ctx context.Context, resumeText, issueCat, issueSev, issueMsg, jobContext string) (*FixResult, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("Claude API key not configured")
-	}
-
 	userContent := fmt.Sprintf(
 		"Resume:\n%s\n\nIssue to fix:\nCategory: %s\nSeverity: %s\nDetails: %s",
 		resumeText, issueCat, issueSev, issueMsg,
@@ -701,62 +686,135 @@ func (c *ClaudeClient) FixResumeIssue(ctx context.Context, resumeText, issueCat,
 	if jobContext != "" {
 		userContent += "\n\n" + jobContext
 	}
-
-	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-5-20250929",
-		MaxTokens: 1500,
-		System:    fixSystemPrompt,
-		Messages: []claudeMessage{
-			{Role: "user", Content: userContent},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Claude API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return nil, fmt.Errorf("parsing Claude response: %w", err)
-	}
-
-	if len(claudeResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from Claude")
-	}
-
-	text := strings.TrimSpace(claudeResp.Content[0].Text)
-	text = stripCodeFences(text)
-
 	var result FixResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("parsing fix suggestions: %w (raw: %s)", err, text)
+	if err := c.callClaude(ctx, fixSystemPrompt, userContent, 1500, &result); err != nil {
+		return nil, err
 	}
+	return &result, nil
+}
 
+// ── Resume → Profile Parsing ──────────────────────────
+
+// ParsedProfile is the structured profile data extracted from a resume
+type ParsedProfile struct {
+	Name           string                `json:"name"`
+	Bio            string                `json:"bio"`
+	Location       string                `json:"location"`
+	Skills         []string              `json:"skills"`
+	Experience     []ParsedExperience    `json:"experience"`
+	Education      []ParsedEducation     `json:"education"`
+	Certifications []ParsedCertification `json:"certifications"`
+	Languages      []ParsedLanguage      `json:"languages"`
+	Volunteer      []ParsedVolunteer     `json:"volunteer"`
+}
+
+type ParsedExperience struct {
+	Title       string `json:"title"`
+	Company     string `json:"company"`
+	Location    string `json:"location"`
+	StartDate   string `json:"startDate"`
+	EndDate     string `json:"endDate"`
+	Current     bool   `json:"current"`
+	Description string `json:"description"`
+}
+
+type ParsedEducation struct {
+	School    string `json:"school"`
+	Degree    string `json:"degree"`
+	Field     string `json:"field"`
+	StartDate string `json:"startDate"`
+	EndDate   string `json:"endDate"`
+}
+
+type ParsedCertification struct {
+	Name         string `json:"name"`
+	Issuer       string `json:"issuer"`
+	DateObtained string `json:"dateObtained"`
+	ExpiryDate   string `json:"expiryDate"`
+	CredentialId string `json:"credentialId"`
+}
+
+type ParsedLanguage struct {
+	Language    string `json:"language"`
+	Proficiency string `json:"proficiency"`
+}
+
+type ParsedVolunteer struct {
+	Organization string `json:"organization"`
+	Role         string `json:"role"`
+	StartDate    string `json:"startDate"`
+	EndDate      string `json:"endDate"`
+	Description  string `json:"description"`
+}
+
+const parseProfileSystemPrompt = `You are HireIQ's resume parser. Extract structured profile data from resume text.
+
+Respond with ONLY a JSON object (no markdown, no backticks, no explanation):
+{
+  "name": "Full Name",
+  "bio": "2-3 sentence professional summary extracted from the resume objective/summary section. If none exists, write a brief one based on their experience.",
+  "location": "City, State",
+  "skills": ["Skill1", "Skill2", "Skill3"],
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "location": "City, State",
+      "startDate": "2022-03",
+      "endDate": "",
+      "current": true,
+      "description": "Key responsibilities and achievements as bullet points, separated by newlines"
+    }
+  ],
+  "education": [
+    {
+      "school": "University Name",
+      "degree": "B.S.",
+      "field": "Computer Science",
+      "startDate": "2014",
+      "endDate": "2018"
+    }
+  ],
+  "certifications": [
+    {
+      "name": "AWS Solutions Architect",
+      "issuer": "Amazon Web Services",
+      "dateObtained": "2023-06",
+      "expiryDate": "",
+      "credentialId": ""
+    }
+  ],
+  "languages": [
+    {"language": "English", "proficiency": "native"},
+    {"language": "Spanish", "proficiency": "conversational"}
+  ],
+  "volunteer": [
+    {
+      "organization": "Code.org",
+      "role": "Volunteer Instructor",
+      "startDate": "2020",
+      "endDate": "",
+      "description": "Taught introductory programming to high school students"
+    }
+  ]
+}
+
+Rules:
+- Extract ALL work experience entries, ordered most recent first
+- Use "YYYY-MM" format for dates when month is known, "YYYY" when only year is known
+- Set "current": true and "endDate": "" for current positions
+- For skills, extract both explicit skill lists and skills mentioned in experience descriptions
+- Proficiency values: "native", "fluent", "conversational", "basic"
+- If a section has no data in the resume, return an empty array []
+- For degree abbreviations use: "B.S.", "B.A.", "M.S.", "M.A.", "M.B.A.", "Ph.D.", "J.D.", "M.D.", "A.S.", "A.A."
+- Clean up and normalize data — fix obvious typos, standardize formatting`
+
+// ParseResumeToProfile sends resume text to Claude and returns structured profile data
+func (c *ClaudeClient) ParseResumeToProfile(ctx context.Context, resumeText string) (*ParsedProfile, error) {
+	var result ParsedProfile
+	if err := c.callClaude(ctx, parseProfileSystemPrompt, "Parse this resume and extract structured profile data:\n\n"+resumeText, 4000, &result); err != nil {
+		return nil, err
+	}
 	return &result, nil
 }
 
@@ -826,69 +884,13 @@ Rules:
 
 // EstimateCompanyIntel uses Claude to estimate company data for private companies
 func (c *ClaudeClient) EstimateCompanyIntel(ctx context.Context, company string) (*CompanyIntelAI, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("Claude API key not configured")
-	}
-
-	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-5-20250929",
-		MaxTokens: 1500,
-		System:    companyIntelSystemPrompt,
-		Messages: []claudeMessage{
-			{Role: "user", Content: "Provide company intelligence data for: " + company},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Claude API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return nil, fmt.Errorf("parsing Claude response: %w", err)
-	}
-
-	if len(claudeResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from Claude")
-	}
-
-	text := strings.TrimSpace(claudeResp.Content[0].Text)
-	text = stripCodeFences(text)
-
 	var result CompanyIntelAI
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("parsing company intel: %w (raw: %s)", err, text)
+	if err := c.callClaude(ctx, companyIntelSystemPrompt, "Provide company intelligence data for: "+company, 1500, &result); err != nil {
+		return nil, err
 	}
-
 	if result.Company == "" {
 		result.Company = company
 	}
-
 	return &result, nil
 }
 
@@ -951,70 +953,14 @@ Rules:
 
 // CompareJobs sends job details to Claude for structured comparison analysis
 func (c *ClaudeClient) CompareJobs(ctx context.Context, jobDescriptions string, userProfile string) (*CompareResult, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("Claude API key not configured")
-	}
-
 	userContent := fmt.Sprintf(
 		"Compare these jobs for the candidate and return the JSON analysis:\n\n%s\n\n=== CANDIDATE PROFILE ===\n%s",
 		jobDescriptions, userProfile,
 	)
-
-	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-5-20250929",
-		MaxTokens: 2500,
-		System:    compareSystemPrompt,
-		Messages: []claudeMessage{
-			{Role: "user", Content: userContent},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Claude API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Claude API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return nil, fmt.Errorf("parsing Claude response: %w", err)
-	}
-
-	if len(claudeResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from Claude")
-	}
-
-	text := strings.TrimSpace(claudeResp.Content[0].Text)
-	text = stripCodeFences(text)
-
 	var result CompareResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("parsing comparison result: %w (raw: %s)", err, text)
+	if err := c.callClaude(ctx, compareSystemPrompt, userContent, 2500, &result); err != nil {
+		return nil, err
 	}
-
 	return &result, nil
 }
 

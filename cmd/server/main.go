@@ -53,7 +53,7 @@ func main() {
 	userRepo := repository.NewUserRepo(pool)
 	jobRepo := repository.NewJobRepo(pool)
 	appRepo := repository.NewApplicationRepo(pool)
-	noteRepo := repository.NewNoteRepo(pool)
+	_ = repository.NewNoteRepo(pool) // Notes handler not yet implemented
 	contactRepo := repository.NewContactRepo(pool)
 	feedRepo := repository.NewFeedRepo(pool)
 	stripeCustomerRepo := repository.NewStripeCustomerRepo(pool)
@@ -63,24 +63,24 @@ func main() {
 	claudeClient := service.NewClaudeClient(cfg.ClaudeAPIKey, cfg.ClaudeBaseURL)
 	yahooClient := service.NewYahooFinanceClient()
 	jsearchClient := service.NewJSearchClient(cfg.RapidAPIKey)
-	feedService := service.NewFeedService(jsearchClient, feedRepo, userRepo)
+	remotiveClient := service.NewRemotiveClient()
+	adzunaClient := service.NewAdzunaClient(cfg.AdzunaAppID, cfg.AdzunaAppKey)
+	feedService := service.NewFeedService(jsearchClient, remotiveClient, adzunaClient, feedRepo, userRepo)
 	stripeService := service.NewStripeService(cfg, stripeCustomerRepo, subscriptionRepo, userRepo)
 
 	// ── Handlers ─────────────────────────────────────────
 	resumeHandler := handler.NewResumeHandler(claudeClient, jobRepo)
 	authHandler := handler.NewAuthHandler(userRepo)
-	profileHandler := handler.NewProfileHandler(userRepo)
+	profileHandler := handler.NewProfileHandler(userRepo, feedService)
 	jobHandler := handler.NewJobHandler(jobRepo, appRepo)
 	parseHandler := handler.NewParseHandler(claudeClient)
-	feedHandler := handler.NewFeedHandler(feedService, feedRepo)
+	feedHandler := handler.NewFeedHandler(feedService, feedRepo, claudeClient, userRepo)
 	companyHandler := handler.NewCompanyHandler(yahooClient, claudeClient)
 	compareHandler := handler.NewCompareHandler(claudeClient, jobRepo, userRepo)
 	appHandler := handler.NewApplicationHandler(appRepo, jobRepo)
 	contactHandler := handler.NewContactHandler(contactRepo)
 	networkHandler := handler.NewNetworkHandler(jobRepo, contactRepo)
 	billingHandler := handler.NewBillingHandler(stripeService, subscriptionRepo)
-	_ = noteRepo // Will be used by notes handler
-
 	// ── Middleware ────────────────────────────────────────
 	authMiddleware, err := middleware.NewAuthMiddleware(cfg.FirebaseProjectID)
 	if err != nil {
@@ -91,6 +91,12 @@ func main() {
 	// ── Router ───────────────────────────────────────────
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
+		// Block wildcard CORS origins in production
+		for _, origin := range cfg.AllowedOrigins {
+			if origin == "*" {
+				log.Fatal().Msg("CORS: wildcard origin '*' is not allowed in production")
+			}
+		}
 	}
 
 	r := gin.New()
@@ -132,6 +138,7 @@ func main() {
 		api.GET("/profile", profileHandler.GetProfile)
 		api.PUT("/profile", profileHandler.UpdateProfile)
 		api.PUT("/profile/skills", profileHandler.UpdateSkills)
+		api.GET("/profile/roles", profileHandler.GetRoleSuggestions)
 
 		// Billing (subscription management)
 		api.GET("/billing/subscription", billingHandler.GetSubscription)
@@ -181,16 +188,14 @@ func main() {
 
 		api.POST("/jobs/parse", requirePro, parseHandler.ParseJobPosting)
 		api.POST("/ai/compare", requirePro, compareHandler.Compare)
+		api.POST("/feed/compare", requirePro, feedHandler.CompareFeedJobs)
 		api.GET("/company/intel", requirePro, companyHandler.GetIntel)
 
 		// Resume
 		api.POST("/resume/upload", resumeHandler.Upload)
 		api.POST("/resume/critique", requirePro, resumeHandler.Critique)
 		api.POST("/resume/fix", requirePro, resumeHandler.Fix)
-
-		// Dashboard (TODO: implement handlers)
-		// api.GET("/dashboard/summary", dashHandler.Summary)
-		// api.GET("/dashboard/calendar", dashHandler.Calendar)
+		api.POST("/resume/parse-profile", requirePro, resumeHandler.ParseToProfile)
 	}
 
 	// ── Server ───────────────────────────────────────────

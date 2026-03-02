@@ -41,6 +41,16 @@ func (h *CompanyHandler) GetIntel(c *gin.Context) {
 		return
 	}
 
+	// Input length limits to prevent abuse of external API calls
+	if len(company) > 256 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Company name too long"})
+		return
+	}
+	if len(ticker) > 10 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ticker symbol too long"})
+		return
+	}
+
 	ctx := c.Request.Context()
 
 	// ── Step 1: Try Yahoo Finance (public companies) ────────

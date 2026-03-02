@@ -60,6 +60,12 @@ func (h *ResumeHandler) Upload(c *gin.Context) {
 		return
 	}
 
+	// Validate PDF magic bytes (header must start with %PDF)
+	if len(fileBytes) < 4 || string(fileBytes[:4]) != "%PDF" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid PDF file"})
+		return
+	}
+
 	// Extract text
 	text, err := extractPDFText(fileBytes)
 	if err != nil {
@@ -194,6 +200,45 @@ func (h *ResumeHandler) Fix(c *gin.Context) {
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get fix suggestions")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI fix suggestions failed. Please try again."})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ParseToProfile handles POST /resume/parse-profile
+// Sends resume text to Claude and returns structured profile data
+func (h *ResumeHandler) ParseToProfile(c *gin.Context) {
+	_, err := getUserID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		return
+	}
+
+	var req struct {
+		ResumeText string `json:"resumeText" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "resumeText is required"})
+		return
+	}
+
+	if len(req.ResumeText) < 50 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Resume text is too short"})
+		return
+	}
+
+	// Cap at 30K chars
+	if len(req.ResumeText) > 30000 {
+		req.ResumeText = req.ResumeText[:30000]
+	}
+
+	log.Info().Int("resumeLen", len(req.ResumeText)).Msg("Parsing resume to profile")
+
+	result, err := h.claude.ParseResumeToProfile(c.Request.Context(), req.ResumeText)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to parse resume to profile")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI profile parsing failed. Please try again."})
 		return
 	}
 
