@@ -6,21 +6,68 @@ import (
 	"github.com/google/uuid"
 )
 
+// ── Profile section types ──────────────────────────────
+
+type Experience struct {
+	Title       string `json:"title"`
+	Company     string `json:"company"`
+	Location    string `json:"location"`
+	StartDate   string `json:"startDate"`
+	EndDate     string `json:"endDate"`
+	Current     bool   `json:"current"`
+	Description string `json:"description"`
+}
+
+type Education struct {
+	School    string `json:"school"`
+	Degree    string `json:"degree"`
+	Field     string `json:"field"`
+	StartDate string `json:"startDate"`
+	EndDate   string `json:"endDate"`
+}
+
+type Certification struct {
+	Name         string `json:"name"`
+	Issuer       string `json:"issuer"`
+	DateObtained string `json:"dateObtained"`
+	ExpiryDate   string `json:"expiryDate,omitempty"`
+	CredentialId string `json:"credentialId,omitempty"`
+}
+
+type Language struct {
+	Language    string `json:"language"`
+	Proficiency string `json:"proficiency"`
+}
+
+type Volunteer struct {
+	Organization string `json:"organization"`
+	Role         string `json:"role"`
+	StartDate    string `json:"startDate"`
+	EndDate      string `json:"endDate"`
+	Description  string `json:"description"`
+}
+
 // User represents a HireIQ user profile
 type User struct {
-	ID           uuid.UUID  `json:"id"`
-	FirebaseUID  string     `json:"-"`
-	Email        string     `json:"email"`
-	Name         string     `json:"name"`
-	Bio          string     `json:"bio"`
-	Location     string     `json:"location"`
-	WorkStyle    string     `json:"workStyle"`
-	SalaryMin    int        `json:"salaryMin"`
-	SalaryMax    int        `json:"salaryMax"`
-	Skills       []string   `json:"skills"`
-	GithubURL    string     `json:"githubUrl"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	ID             uuid.UUID       `json:"id"`
+	FirebaseUID    string          `json:"-"`
+	Email          string          `json:"email"`
+	Name           string          `json:"name"`
+	Bio            string          `json:"bio"`
+	Location       string          `json:"location"`
+	WorkStyle      string          `json:"workStyle"`
+	SalaryMin      int             `json:"salaryMin"`
+	SalaryMax      int             `json:"salaryMax"`
+	Skills         []string        `json:"skills"`
+	TargetRoles    []string        `json:"targetRoles"`
+	GithubURL      string          `json:"githubUrl"`
+	Experience     []Experience    `json:"experience"`
+	Education      []Education     `json:"education"`
+	Certifications []Certification `json:"certifications"`
+	Languages      []Language      `json:"languages"`
+	Volunteer      []Volunteer     `json:"volunteer"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 // Job represents a saved/tracked job listing
