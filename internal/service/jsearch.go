@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/yourusername/hireiq-api/internal/model"
 )
 
 // JSearchClient wraps the JSearch API on RapidAPI
@@ -62,7 +64,7 @@ type JSearchQuery struct {
 	Query      string // e.g. "React developer"
 	Location   string // e.g. "San Francisco" or "" for remote
 	RemoteOnly bool
-	PageSize   int    // max 20
+	NumPages   int // pages to fetch per query (default 1, max 3)
 }
 
 // ── Search method ─────────────────────────────────────
@@ -81,28 +83,58 @@ func (c *JSearchClient) Search(ctx context.Context, q JSearchQuery) ([]JSearchJo
 		query += " remote"
 	}
 
-	pageSize := q.PageSize
-	if pageSize == 0 || pageSize > 20 {
-		pageSize = 10
+	numPages := q.NumPages
+	if numPages <= 0 || numPages > 5 {
+		numPages = 1
 	}
 
-	params := url.Values{}
-	params.Set("query", query)
-	params.Set("page", "1")
-	params.Set("num_pages", "1")
-	params.Set("date_posted", "week") // Only recent listings
+	// Fetch each page separately — more reliable than num_pages which
+	// may be capped on free-tier RapidAPI plans.
+	var allResults []JSearchJob
 
-	if q.RemoteOnly {
-		params.Set("remote_jobs_only", "true")
+	for page := 1; page <= numPages; page++ {
+		params := url.Values{}
+		params.Set("query", query)
+		params.Set("page", strconv.Itoa(page))
+		params.Set("num_pages", "1")
+		params.Set("date_posted", "month")
+
+		if q.RemoteOnly {
+			params.Set("remote_jobs_only", "true")
+		}
+
+		reqURL := "https://jsearch.p.rapidapi.com/search?" + params.Encode()
+
+		log.Info().
+			Str("query", query).
+			Int("page", page).
+			Msg("Searching JSearch API")
+
+		results, err := c.fetchPage(ctx, reqURL)
+		if err != nil {
+			log.Error().Err(err).Int("page", page).Str("query", query).Msg("JSearch page fetch failed")
+			break // stop paging on error (likely rate limit or no more results)
+		}
+
+		allResults = append(allResults, results...)
+
+		// If this page returned fewer than 10, there are no more pages
+		if len(results) < 10 {
+			break
+		}
 	}
-
-	reqURL := "https://jsearch.p.rapidapi.com/search?" + params.Encode()
 
 	log.Info().
+		Int("results", len(allResults)).
 		Str("query", query).
-		Str("url", reqURL).
-		Msg("Searching JSearch API")
+		Int("pages", numPages).
+		Msg("JSearch API search complete")
 
+	return allResults, nil
+}
+
+// fetchPage makes a single HTTP request to JSearch and returns the results.
+func (c *JSearchClient) fetchPage(ctx context.Context, reqURL string) ([]JSearchJob, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -131,57 +163,80 @@ func (c *JSearchClient) Search(ctx context.Context, q JSearchQuery) ([]JSearchJo
 		return nil, fmt.Errorf("parsing JSearch response: %w", err)
 	}
 
-	log.Info().
-		Int("results", len(result.Data)).
-		Str("query", query).
-		Msg("JSearch API returned results")
-
 	return result.Data, nil
 }
 
-// BuildQueriesFromProfile generates JSearch queries based on user skills and preferences
-func BuildQueriesFromProfile(skills []string, location string, workStyle string) []JSearchQuery {
-	var queries []JSearchQuery
-	remoteOnly := strings.EqualFold(workStyle, "remote")
+// BuildQueriesFromProfile generates JSearch queries from the user profile.
+// Target roles are the PRIMARY search driver (highest page counts).
+// Skills and experience titles are SECONDARY for broader coverage.
+func BuildQueriesFromProfile(user *model.User) []JSearchQuery {
+	remoteOnly := strings.EqualFold(user.WorkStyle, "remote")
+	location := user.Location
+	seen := make(map[string]bool)
 
-	if len(skills) == 0 {
-		// Fallback: generic software job search
-		queries = append(queries, JSearchQuery{
-			Query:      "software engineer",
+	add := func(queries []JSearchQuery, query string, pages int) []JSearchQuery {
+		q := strings.TrimSpace(query)
+		key := strings.ToLower(q)
+		if q == "" || seen[key] {
+			return queries
+		}
+		seen[key] = true
+		return append(queries, JSearchQuery{
+			Query:      q,
 			Location:   location,
 			RemoteOnly: remoteOnly,
-			PageSize:   10,
+			NumPages:   pages,
 		})
-		return queries
 	}
 
-	// Strategy: combine top skills into 2-3 targeted queries
-	// rather than one query per skill (saves API calls)
+	var queries []JSearchQuery
 
-	// Query 1: Top 2-3 skills combined
-	topSkills := skills
-	if len(topSkills) > 3 {
-		topSkills = topSkills[:3]
+	// ── PRIMARY: Target roles (highest priority, most pages) ──
+	for _, role := range user.TargetRoles {
+		role = strings.TrimSpace(role)
+		if role != "" {
+			queries = add(queries, role, 3)
+		}
 	}
-	queries = append(queries, JSearchQuery{
-		Query:      strings.Join(topSkills, " ") + " developer",
-		Location:   location,
-		RemoteOnly: remoteOnly,
-		PageSize:   10,
-	})
 
-	// Query 2: If enough skills, use a different combination
-	if len(skills) > 3 {
-		secondSet := skills[2:]
+	// ── SECONDARY: Skills-based queries (fill remaining slots) ──
+	if len(user.Skills) > 0 && len(queries) < 4 {
+		topSkills := user.Skills
+		if len(topSkills) > 3 {
+			topSkills = topSkills[:3]
+		}
+		queries = add(queries, strings.Join(topSkills, " ")+" developer", 2)
+	}
+
+	if len(user.Skills) > 3 && len(queries) < 5 {
+		secondSet := user.Skills[3:]
 		if len(secondSet) > 3 {
 			secondSet = secondSet[:3]
 		}
-		queries = append(queries, JSearchQuery{
-			Query:      strings.Join(secondSet, " ") + " engineer",
+		queries = add(queries, strings.Join(secondSet, " ")+" engineer", 2)
+	}
+
+	// ── TERTIARY: Experience titles ──
+	for i := 0; i < len(user.Experience) && i < 2 && len(queries) < 6; i++ {
+		title := strings.TrimSpace(user.Experience[i].Title)
+		if title != "" {
+			queries = add(queries, title, 2)
+		}
+	}
+
+	// ── FALLBACK: If no target roles, skills, or experience ──
+	if len(queries) == 0 {
+		return append(queries, JSearchQuery{
+			Query:      "software engineer",
 			Location:   location,
 			RemoteOnly: remoteOnly,
-			PageSize:   10,
+			NumPages:   2,
 		})
+	}
+
+	// Safety cap
+	if len(queries) > 8 {
+		queries = queries[:8]
 	}
 
 	return queries

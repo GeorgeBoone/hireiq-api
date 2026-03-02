@@ -24,7 +24,9 @@ type Config struct {
 	ClaudeBaseURL string
 
 	// Job Feed
-	RapidAPIKey string
+	RapidAPIKey  string
+	AdzunaAppID  string
+	AdzunaAppKey string
 
 	// Cloud Storage
 	StorageBucket string
@@ -57,6 +59,8 @@ func Load() (*Config, error) {
 		ClaudeAPIKey:   getEnv("CLAUDE_API_KEY", ""),
 		ClaudeBaseURL:  getEnv("CLAUDE_BASE_URL", "https://api.anthropic.com"),
 		RapidAPIKey:    getEnv("RAPIDAPI_KEY", ""),
+		AdzunaAppID:   getEnv("ADZUNA_APP_ID", ""),
+		AdzunaAppKey:  getEnv("ADZUNA_APP_KEY", ""),
 		StorageBucket:  getEnv("STORAGE_BUCKET", ""),
 		RateLimitRPS:        getEnvInt("RATE_LIMIT_RPS", 10),
 		StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),

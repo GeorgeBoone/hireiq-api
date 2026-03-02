@@ -38,7 +38,7 @@ func (r *FeedRepo) UpsertFeedJob(ctx context.Context, job *model.FeedJob) (*mode
 	`, job.ExternalID, job.Source, job.Title, job.Company, job.Location,
 		job.SalaryMin, job.SalaryMax, job.SalaryText, job.JobType,
 		job.Description, job.RequiredSkills, job.ApplyURL, job.CompanyLogo,
-		job.PostedAt, time.Now().Add(7*24*time.Hour), // Expires in 7 days
+		job.PostedAt, time.Now().Add(14*24*time.Hour), // Expires in 14 days
 	).Scan(
 		&result.ID, &result.ExternalID, &result.Source, &result.Title, &result.Company,
 		&result.Location, &result.SalaryMin, &result.SalaryMax, &result.SalaryText,
@@ -230,6 +230,109 @@ func (r *FeedRepo) LogRefresh(ctx context.Context, userID uuid.UUID, query strin
 		return fmt.Errorf("logging refresh: %w", err)
 	}
 	return nil
+}
+
+// GetUserFeedForRescore returns all non-dismissed feed jobs for a user,
+// used to recalculate match scores when the user's profile changes.
+func (r *FeedRepo) GetUserFeedForRescore(ctx context.Context, userID uuid.UUID) ([]model.FeedJob, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT fj.id, fj.external_id, fj.source, fj.title, fj.company, fj.location,
+		       fj.salary_min, fj.salary_max, fj.salary_text, fj.job_type,
+		       fj.description, fj.required_skills, fj.apply_url, fj.company_logo,
+		       fj.posted_at, fj.fetched_at,
+		       uf.match_score, uf.dismissed, uf.saved, uf.saved_job_id
+		FROM user_feed uf
+		JOIN feed_jobs fj ON fj.id = uf.feed_job_id
+		WHERE uf.user_id = $1
+		  AND uf.dismissed = false
+		  AND (fj.expires_at IS NULL OR fj.expires_at > now())
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting feed for rescore: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []model.FeedJob
+	for rows.Next() {
+		var j model.FeedJob
+		err := rows.Scan(
+			&j.ID, &j.ExternalID, &j.Source, &j.Title, &j.Company, &j.Location,
+			&j.SalaryMin, &j.SalaryMax, &j.SalaryText, &j.JobType,
+			&j.Description, &j.RequiredSkills, &j.ApplyURL, &j.CompanyLogo,
+			&j.PostedAt, &j.FetchedAt,
+			&j.MatchScore, &j.Dismissed, &j.Saved, &j.SavedJobID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scanning feed job for rescore: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+
+	return jobs, nil
+}
+
+// BatchUpdateMatchScores updates match scores for multiple user_feed entries.
+// Uses a single batch query for efficiency.
+func (r *FeedRepo) BatchUpdateMatchScores(ctx context.Context, userID uuid.UUID, scores map[uuid.UUID]int) error {
+	if len(scores) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	for feedJobID, score := range scores {
+		batch.Queue(`
+			UPDATE user_feed SET match_score = $3
+			WHERE user_id = $1 AND feed_job_id = $2
+		`, userID, feedJobID, score)
+	}
+
+	br := r.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for range scores {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("batch updating match scores: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetFeedJobsByIDs fetches multiple feed jobs by ID, scoped to a user via user_feed join.
+func (r *FeedRepo) GetFeedJobsByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]model.FeedJob, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT fj.id, fj.external_id, fj.source, fj.title, fj.company, fj.location,
+		       fj.salary_min, fj.salary_max, fj.salary_text, fj.job_type,
+		       fj.description, fj.required_skills, fj.apply_url, fj.company_logo,
+		       fj.posted_at, fj.fetched_at,
+		       uf.match_score, uf.dismissed, uf.saved, uf.saved_job_id
+		FROM user_feed uf
+		JOIN feed_jobs fj ON fj.id = uf.feed_job_id
+		WHERE uf.user_id = $1
+		  AND fj.id = ANY($2)
+	`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("getting feed jobs by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []model.FeedJob
+	for rows.Next() {
+		var j model.FeedJob
+		err := rows.Scan(
+			&j.ID, &j.ExternalID, &j.Source, &j.Title, &j.Company, &j.Location,
+			&j.SalaryMin, &j.SalaryMax, &j.SalaryText, &j.JobType,
+			&j.Description, &j.RequiredSkills, &j.ApplyURL, &j.CompanyLogo,
+			&j.PostedAt, &j.FetchedAt,
+			&j.MatchScore, &j.Dismissed, &j.Saved, &j.SavedJobID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scanning feed job by ID: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+
+	return jobs, nil
 }
 
 // CleanExpiredFeedJobs removes feed jobs past their expiration
